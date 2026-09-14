@@ -15,19 +15,23 @@
 namespace bpe {
     namespace {
         using u8 = std::uint8_t;
-        using u32 = std::uint32_t;
+        using u32=std::uint32_t;
         using u64=std::uint64_t;
-        constexpr u32 no_position = std::numeric_limits<u32>::max();
-        constexpr u32 byte_value_count = 256;
+        constexpr u32 no_position= std::numeric_limits<u32>::max();
+        constexpr u32 byte_value_count =256;
         constexpr std::size_t kParallelThreshold = 2000;
     }
 u64 pack_pair(u32 left, u32 right) {
     return (static_cast<u64>(left) << 32) | static_cast<u64>(right);
 }
 
-u32 pair_left(u64 key) { return static_cast<u32>(key >> 32); }
+u32 pair_left(u64 key) { 
+    return static_cast<u32>(key >> 32); 
+}
 
-u32 pair_right(u64 key) { return static_cast<u32>(key); }
+u32 pair_right(u64 key) { 
+    return static_cast<u32>(key); 
+}
 
 u64 text_fingerprint(const std::string& left, const std::string& right) {
     u64 fingerprint = 0;
@@ -47,11 +51,11 @@ u64 text_fingerprint(const std::string& left, const std::string& right) {
 
 struct pair_state {
     u64 key = 0;
-    u64 count = 0;
-    u32 word_count = 0;
+    u64 count =0;
+    u32 word_count= 0;
     std::vector<u32> positions;
-    u32 last_word = no_position;
-    u32 last_group = no_position;
+    u32 last_word=no_position;
+    u32 last_group=no_position;
     u64 fingerprint = 0;
 };
 
@@ -64,7 +68,7 @@ struct queue_entry {
 struct task2_state;
 
 struct queue_compare {
-    const task2_state* state = nullptr;
+    const task2_state* state =nullptr;
 
     bool operator()(const queue_entry& left, const queue_entry& right) const;
 };
@@ -83,7 +87,7 @@ struct queue_heap {
     }
 
     void pop() {
-        data[0] = std::move(data.back());
+        data[0] =std::move(data.back());
         data.pop_back();
         if (!data.empty()) {
             sift_down(0);
@@ -92,7 +96,7 @@ struct queue_heap {
 
    private:
     static std::size_t parent(std::size_t i) { return (i - 1) / 4; }
-    static std::size_t first_child(std::size_t i) { return 4 * i + 1; }
+    static std::size_t first_child(std::size_t i) { return 4*i + 1; }
 
     void sift_up(std::size_t i) {
         while (i > 0) {
@@ -144,10 +148,10 @@ struct task2_state {
     std::vector<u32> left_state;
     std::vector<u32> right_stamp;
     std::vector<u32> right_state;
-    u32 same_stamp = no_position;
-    u32 same_state = no_position;
+    u32 same_stamp =no_position;
+    u32 same_state =no_position;
     std::vector<u32> born_states;
-    u32 free_head = no_position;
+    u32 free_head=no_position;
 };
 
 bool queue_compare::operator()(const queue_entry& left,
@@ -160,10 +164,8 @@ bool queue_compare::operator()(const queue_entry& left,
     }
     const pair_state& a = state->pair_states[left.state];
     const pair_state& b = state->pair_states[right.state];
-    const std::string left_text = state->vocabulary[pair_left(a.key)] +
-                                  state->vocabulary[pair_right(a.key)];
-    const std::string right_text = state->vocabulary[pair_left(b.key)] +
-                                   state->vocabulary[pair_right(b.key)];
+    const std::string left_text = state->vocabulary[pair_left(a.key)] +state->vocabulary[pair_right(a.key)];
+    const std::string right_text = state->vocabulary[pair_left(b.key)] +state->vocabulary[pair_right(b.key)];
     return std::strcmp(left_text.c_str(), right_text.c_str()) > 0;
 }
 
@@ -176,9 +178,7 @@ u32 create_pair_state(task2_state& state, u64 key) {
     state.pair_states.push_back(pair_state{});
     pair_state& pair = state.pair_states.back();
     pair.key = key;
-    pair.fingerprint = text_fingerprint(state.vocabulary[pair_left(key)],
-                                        state.vocabulary[pair_right(key)]);
-    state.born_states.push_back(state_id);
+    pair.fingerprint = text_fingerprint(state.vocabulary[pair_left(key)],state.vocabulary[pair_right(key)]);state.born_states.push_back(state_id);
     return state_id;
 }
 
@@ -491,12 +491,169 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
     {
         const int tid = omp_get_thread_num();
         std::vector<MergeEvent>& events = local_events[tid];
+        events.reserve(positions.size() / static_cast<std::size_t>(num_threads) + 16);
 
+        #pragma omp for schedule(dynamic, 64)
+        for (std::size_t idx = 0; idx < active_words.size(); ++idx) {
+            const u32 word = active_words[idx];
+            const u64 frequency = state.word_frequencies[word];
+            for (u32 position : by_word.at(word)) {
+                if (!pair_is_at(state, position, left_token, right_token)) {
+                    continue;
+                }
+                const u32 right_position = state.next[position];
+                const u32 left_position = state.previous[position];
+                const u32 after_position = state.next[right_position];
+
+                MergeEvent ev;
+                ev.word = word;
+                ev.frequency = frequency;
+                ev.position = position;
+                ev.right_position = right_position;
+                ev.left_position =
+                    is_live(state, left_position) ? left_position : no_position;
+                ev.after_position =
+                    is_live(state, after_position) ? after_position : no_position;
+
+                state.token[position] = merged_token;
+                state.alive[right_position] = 0;
+                state.next[position] = after_position;
+                if (after_position != no_position) {
+                    state.previous[after_position] = position;
+                }
+                state.previous[right_position] = no_position;
+                state.next[right_position] = no_position;
+                // edge_group[right_position] 留给回放阶段的 remove_edge 处理，只有 after_position 不存在时才手动清
+
+                ev.left_token = (ev.left_position != no_position)
+                                    ? state.token[ev.left_position]
+                                    : no_position;
+                ev.after_token = (ev.after_position != no_position)
+                                     ? state.token[ev.after_position]
+                                     : no_position;
+
+                events.push_back(ev);
+            }
+        }
     }
 
+    for (const std::vector<MergeEvent>& events : local_events) {
+        for (const MergeEvent& ev : events) {
+            if (ev.left_position != no_position) {
+                remove_edge(state, ev.left_position, ev.frequency);
+            }
+            remove_edge(state, ev.position, ev.frequency);
+            if (ev.after_position != no_position) {
+                remove_edge(state, ev.right_position, ev.frequency);
+            } else {
+                state.edge_group[ev.right_position] = no_position;
+            }
+
+            state.token_count[left_token] -= ev.frequency;
+            state.token_count[right_token] -= ev.frequency;
+            state.token_count[merged_token] += ev.frequency;
+
+            if (ev.left_position != no_position) {
+                const u32 state_id =
+                    get_left_pair_state(state, ev.left_token, merged_token);
+                add_edge(state, ev.left_position, state_id, ev.word,
+                        ev.frequency);
+            }
+            if (ev.after_position != no_position) {
+                const u32 state_id =
+                    get_right_pair_state(state, merged_token, ev.after_token);
+                add_edge(state, ev.position, state_id, ev.word, ev.frequency);
+            }
+        }
+    }
 }
 
+void run_merge_loop_parallel(task2_state& state) {
+    queue_heap queue;
+    queue.comp.state = &state;
+    for (u32 state_id = 0; state_id < state.pair_states.size(); ++state_id) {
+        const pair_state& pair = state.pair_states[state_id];
+        if (pair.word_count >= 2) {
+            queue.push(queue_entry{pair.count, pair.fingerprint, state_id});
+        }
+    }
 
+    for (;;) {
+        const u32 best_state = pop_best_state(state, queue);
+        if (best_state == no_position) {
+            break;
+        }
 
+        const u64 best_key = state.pair_states[best_state].key;
+        std::vector<u32> positions =
+            std::move(state.pair_states[best_state].positions);
+        const u32 left_token = pair_left(best_key);
+        const u32 right_token = pair_right(best_key);
+        const u32 merged_token = static_cast<u32>(state.vocabulary.size());
 
+        std::string merged_text;
+        merged_text.reserve(state.vocabulary[left_token].size() +
+                            state.vocabulary[right_token].size());
+        merged_text.append(state.vocabulary[left_token]);
+        merged_text.append(state.vocabulary[right_token]);
+        state.vocabulary.push_back(std::move(merged_text));
+        state.token_count.push_back(0);
+        if (state.left_stamp.size() <= merged_token) {
+            const std::size_t new_size = std::max<std::size_t>(
+                state.left_stamp.size() * 2, merged_token + 1024);
+            state.left_stamp.resize(new_size, no_position);
+            state.left_state.resize(new_size, no_position);
+            state.right_stamp.resize(new_size, no_position);
+            state.right_state.resize(new_size, no_position);
+        }
+
+        if (positions.size() >= kParallelThreshold &&
+            omp_get_max_threads() > 1) {
+            process_positions_parallel(state, positions, left_token,
+                                       right_token, merged_token);
+        } else {
+            process_positions_sequential(state, positions, left_token,
+                                         right_token, merged_token);
+        }
+
+        push_born_states(state, queue);
+    }
 }
+
+// 直接复制task2.cpp
+
+void finalize_results(const task2_state& state, Results& results) {
+    std::vector<u32> live_tokens;
+    live_tokens.reserve(state.token_count.size());
+    for (u32 token_id = 1; token_id < state.token_count.size(); ++token_id) {
+        if (state.token_count[token_id] != 0) {
+            live_tokens.push_back(token_id);
+        }
+    }
+    std::sort(live_tokens.begin(), live_tokens.end(),
+              [&state](u32 left, u32 right) {
+                  if (state.token_count[left] != state.token_count[right]) {
+                      return state.token_count[left] > state.token_count[right];
+                  }
+                  return std::strcmp(state.vocabulary[left].c_str(),state.vocabulary[right].c_str()) < 0;
+              });
+
+    results.tokens.clear();
+    results.tokens.reserve(live_tokens.size());
+    for (u32 token_id : live_tokens) {
+        const std::string& text = state.vocabulary[token_id];
+        results.tokens.push_back(
+            TokenCount{std::vector<Byte>(text.begin(), text.end()),static_cast<std::size_t>(state.token_count[token_id])});
+    }
+}
+
+}  // namespace
+
+void parallel_task2(const std::vector<CharSplit>& splits, Results& results) {
+    task2_state state;
+    build_state(splits, state);
+    run_merge_loop_parallel(state);
+    finalize_results(state, results);
+}
+
+}  // namespace bpe
