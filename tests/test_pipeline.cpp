@@ -42,7 +42,7 @@ TEST(RunPipeline, ProducesTask1AndTask2Results) {
     std::vector<bpe::Byte> buffer(input.begin(), input.end());
     const bpe::Results r = bpe::run_pipeline(buffer);
 
-    // Task 1.1 (word_counts order is unspecified): hug x2, pug x1.
+    // Task 1.1 (word_counts is in lexicographic order): hug x2, pug x1.
     ASSERT_EQ(r.word_counts.size(), 2u);
     auto find_count = [&](const std::string& word) -> std::size_t {
         for (const auto& wc : r.word_counts) {
