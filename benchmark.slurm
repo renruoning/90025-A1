@@ -1,10 +1,10 @@
 #!/bin/bash
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+#SBATCH --job-name=bpe_benchmark
+#SBATCH --partition=cascade
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --time=02:00:00
+#SBATCH --exclusive
 
 set -euo pipefail
 
