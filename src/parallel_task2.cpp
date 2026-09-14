@@ -20,7 +20,6 @@ namespace bpe {
         constexpr u32 no_position= std::numeric_limits<u32>::max();
         constexpr u32 byte_value_count =256;
         constexpr std::size_t kParallelThreshold = 2000;
-    }
 u64 pack_pair(u32 left, u32 right) {
     return (static_cast<u64>(left) << 32) | static_cast<u64>(right);
 }
@@ -625,7 +624,7 @@ void run_merge_loop_parallel(task2_state& state) {
 void finalize_results(const task2_state& state, Results& results) {
     std::vector<u32> live_tokens;
     live_tokens.reserve(state.token_count.size());
-    for (u32 token_id = 1; token_id < state.token_count.size(); ++token_id) {
+    for (u32 token_id=1; token_id<state.token_count.size();++token_id) {
         if (state.token_count[token_id] != 0) {
             live_tokens.push_back(token_id);
         }
@@ -656,4 +655,4 @@ void parallel_task2(const std::vector<CharSplit>& splits, Results& results) {
     finalize_results(state, results);
 }
 
-}  // namespace bpe
+}
