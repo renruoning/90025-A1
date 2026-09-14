@@ -19,7 +19,7 @@ namespace bpe {
         using u64=std::uint64_t;
         constexpr u32 no_position= std::numeric_limits<u32>::max();
         constexpr u32 byte_value_count =256;
-        constexpr std::size_t kParallelThreshold = 2000;
+        constexpr std::size_t kParallelThreshold = 20000;
 u64 pack_pair(u32 left, u32 right) {
     return (static_cast<u64>(left) << 32) | static_cast<u64>(right);
 }
@@ -634,7 +634,7 @@ void finalize_results(const task2_state& state, Results& results) {
         }
     }
     std::sort(live_tokens.begin(), live_tokens.end(),
-              [&state](u32 left, u32 right) {
+              [&state](u32 left,u32 right) {
                   if (state.token_count[left] !=state.token_count[right]) {
                       return state.token_count[left] > state.token_count[right];
                   }
@@ -644,7 +644,7 @@ void finalize_results(const task2_state& state, Results& results) {
     results.tokens.clear();
     results.tokens.reserve(live_tokens.size());
     for (u32 token_id : live_tokens) {
-        const std::string& text =state.vocabulary[token_id];
+        const std::string& text=state.vocabulary[token_id];
         results.tokens.push_back(
             TokenCount{std::vector<Byte>(text.begin(), text.end()),static_cast<std::size_t>(state.token_count[token_id])});
     }
