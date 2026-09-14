@@ -98,8 +98,5 @@ void parallel_task1(std::vector<Byte>& input, Results& results) {
         results.char_splits.push_back(CharSplit{word_bytes, count});
     }
 }
-void parallel_task2(const std::vector<CharSplit>& splits, Results& results) {
-    task2(splits, results);
-}
 
 }
