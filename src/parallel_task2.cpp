@@ -483,8 +483,11 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
     for(const auto& entry:by_word){
         active_words.push_back(entry.first);
     }
-    const int num_gthreads=omp_get_max_threads();
+    const int num_threads=omp_get_max_threads();
     std::vector<std::vector<MergeEvent>> local_events(num_threads);
+
+    // token_count 只按 frequency 累加，可以用 OpenMP reduction 代替在下面顺序回放阶段逐个操作共享状态
+    u64 total_frequency = 0;
 
     #pragma omp parallel
     {
@@ -492,7 +495,7 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
         std::vector<MergeEvent>& events = local_events[tid];
         events.reserve(positions.size() / static_cast<std::size_t>(num_threads) + 16);
 
-        #pragma omp for schedule(dynamic, 64)
+        #pragma omp for schedule(dynamic, 64) reduction(+:total_frequency)
         for (std::size_t idx = 0; idx < active_words.size(); ++idx) {
             const u32 word = active_words[idx];
             const u64 frequency = state.word_frequencies[word];
@@ -531,10 +534,15 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
                                      ? state.token[ev.after_position]
                                      : no_position;
 
+                total_frequency += frequency;
                 events.push_back(ev);
             }
         }
     }
+
+    state.token_count[left_token] -= total_frequency;
+    state.token_count[right_token] -= total_frequency;
+    state.token_count[merged_token] += total_frequency;
 
     for (const std::vector<MergeEvent>& events : local_events) {
         for (const MergeEvent& ev : events) {
@@ -547,10 +555,6 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
             } else {
                 state.edge_group[ev.right_position] = no_position;
             }
-
-            state.token_count[left_token] -= ev.frequency;
-            state.token_count[right_token] -= ev.frequency;
-            state.token_count[merged_token] += ev.frequency;
 
             if (ev.left_position != no_position) {
                 const u32 state_id =
@@ -631,7 +635,7 @@ void finalize_results(const task2_state& state, Results& results) {
     }
     std::sort(live_tokens.begin(), live_tokens.end(),
               [&state](u32 left, u32 right) {
-                  if (state.token_count[left] != state.token_count[right]) {
+                  if (state.token_count[left] !=state.token_count[right]) {
                       return state.token_count[left] > state.token_count[right];
                   }
                   return std::strcmp(state.vocabulary[left].c_str(),state.vocabulary[right].c_str()) < 0;
@@ -640,7 +644,7 @@ void finalize_results(const task2_state& state, Results& results) {
     results.tokens.clear();
     results.tokens.reserve(live_tokens.size());
     for (u32 token_id : live_tokens) {
-        const std::string& text = state.vocabulary[token_id];
+        const std::string& text =state.vocabulary[token_id];
         results.tokens.push_back(
             TokenCount{std::vector<Byte>(text.begin(), text.end()),static_cast<std::size_t>(state.token_count[token_id])});
     }
