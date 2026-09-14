@@ -641,4 +641,9 @@ void parallel_task2_v3(const std::vector<CharSplit>& splits, Results& results) {
     run_merge_loop_parallel(state);
     finalize_results(state,results);
 }
+
+void parallel_task2(const std::vector<CharSplit>& splits, Results& results) {
+    parallel_task2_v3(splits, results);
+}
+
 }  // namespace bpe
