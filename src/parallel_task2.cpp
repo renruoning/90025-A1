@@ -652,7 +652,7 @@ void finalize_results(const task2_state& state, Results& results) {
 
 }  // namespace
 
-void parallel_task2_v1(const std::vector<CharSplit>& splits, Results& results) {
+void parallel_task2(const std::vector<CharSplit>& splits, Results& results) {
     task2_state state;
     build_state(splits, state);
     run_merge_loop_parallel(state);
