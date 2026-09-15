@@ -22,6 +22,11 @@ namespace bpe {
         constexpr u32 no_position= std::numeric_limits<u32>::max();
         constexpr u32 byte_value_count =256;
         constexpr std::size_t kParallelThreshold = 20000;
+
+        std::int64_t g_bucket_ns = 0;
+        std::int64_t g_surgery_ns = 0;
+        std::int64_t g_replay_ns = 0;
+        std::uint64_t g_parallel_positions = 0;
 u64 pack_pair(u32 left, u32 right) {
     return (static_cast<u64>(left) << 32) | static_cast<u64>(right);
 }
@@ -475,6 +480,7 @@ void process_positions_sequential(task2_state& state, const std::vector<u32>& po
 }
 
 void process_positions_parallel(task2_state& state, const std::vector<u32>& positions, u32 left_token, u32 right_token, u32 merged_token) {
+    const auto bucket_t0 = std::chrono::steady_clock::now();
     std::unordered_map<u32, std::vector<u32>> by_word;
     by_word.reserve(positions.size());
     for (u32 position : positions) {
@@ -485,12 +491,19 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
     for(const auto& entry:by_word){
         active_words.push_back(entry.first);
     }
+    const auto bucket_t1 = std::chrono::steady_clock::now();
+    g_bucket_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       bucket_t1 - bucket_t0)
+                       .count();
+    g_parallel_positions += positions.size();
+
     const int num_threads=omp_get_max_threads();
     std::vector<std::vector<MergeEvent>> local_events(num_threads);
 
     // token_count 只按 frequency 累加，可以用 OpenMP reduction 代替在下面顺序回放阶段逐个操作共享状态
     u64 total_frequency = 0;
 
+    const auto surgery_t0 = std::chrono::steady_clock::now();
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -541,11 +554,16 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
             }
         }
     }
+    const auto surgery_t1 = std::chrono::steady_clock::now();
+    g_surgery_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        surgery_t1 - surgery_t0)
+                        .count();
 
     state.token_count[left_token] -= total_frequency;
     state.token_count[right_token] -= total_frequency;
     state.token_count[merged_token] += total_frequency;
 
+    const auto replay_t0 = std::chrono::steady_clock::now();
     for (const std::vector<MergeEvent>& events : local_events) {
         for (const MergeEvent& ev : events) {
             if (ev.left_position != no_position) {
@@ -571,6 +589,10 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
             }
         }
     }
+    const auto replay_t1 = std::chrono::steady_clock::now();
+    g_replay_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       replay_t1 - replay_t0)
+                       .count();
 }
 
 void run_merge_loop_parallel(task2_state& state) {
@@ -655,6 +677,11 @@ void run_merge_loop_parallel(task2_state& state) {
               << " select(pop+push_born)=" << (select_ns / 1000000) << " ms"
               << " apply(process_positions)=" << (apply_ns / 1000000)
               << " ms";
+    LOG(INFO) << "task2 parallel-round breakdown: positions="
+              << g_parallel_positions
+              << " bucket=" << (g_bucket_ns / 1000000) << " ms"
+              << " surgery=" << (g_surgery_ns / 1000000) << " ms"
+              << " replay=" << (g_replay_ns / 1000000) << " ms";
 }
 
 // 直接复制task2.cpp
