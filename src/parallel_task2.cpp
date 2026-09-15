@@ -1,8 +1,6 @@
 #include "bpe.h"
-#include "absl/log/log.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -22,15 +20,6 @@ namespace bpe {
         constexpr u32 no_position= std::numeric_limits<u32>::max();
         constexpr u32 byte_value_count =256;
         constexpr std::size_t kParallelThreshold = 20000;
-
-        // 分块+合并的分桶方案在大轮次里合并开销很大（接近一词一次出现，合并=重做一遍分桶），改成按 word%num_threads 直接分配所有权，不再需要合并
-        std::int64_t g_surgery_ns = 0;
-        std::int64_t g_replay_ns = 0;
-        std::uint64_t g_parallel_positions = 0;
-
-        // pair_state.positions 是懒删除的，一个 position 可能在被选中前就被别的轮次合并掉、变成过期数据，靠 pair_is_at() 才发现并跳过；这里统计这部分浪费的迭代占比
-        std::uint64_t g_seq_positions_seen = 0;
-        std::uint64_t g_seq_positions_stale = 0;
 u64 pack_pair(u32 left, u32 right) {
     return (static_cast<u64>(left) << 32) | static_cast<u64>(right);
 }
@@ -470,10 +459,8 @@ struct MergeEvent{
 void process_positions_sequential(task2_state& state, const std::vector<u32>& positions, u32 left_token, u32 right_token, u32 merged_token) {
     u32 current_word = no_position;
     u64 frequency = 0;
-    g_seq_positions_seen += positions.size();
     for (u32 position : positions) {
         if (!pair_is_at(state, position, left_token, right_token)) {
-            ++g_seq_positions_stale;
             continue;
         }
         const u32 right_position = state.next[position];
@@ -525,10 +512,8 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
     const u32 num_threads_u32 = static_cast<u32>(num_threads);
     std::vector<std::vector<MergeEvent>> local_events(
         static_cast<std::size_t>(num_threads));
-    g_parallel_positions += positions.size();
 
     u64 total_frequency = 0;
-    const auto surgery_t0 = std::chrono::steady_clock::now();
     #pragma omp parallel reduction(+:total_frequency)
     {
         const int tid = omp_get_thread_num();
@@ -591,16 +576,11 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
             }
         }
     }
-    const auto surgery_t1 = std::chrono::steady_clock::now();
-    g_surgery_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        surgery_t1 - surgery_t0)
-                        .count();
 
     state.token_count[left_token] -= total_frequency;
     state.token_count[right_token] -= total_frequency;
     state.token_count[merged_token] += total_frequency;
 
-    const auto replay_t0 = std::chrono::steady_clock::now();
     for (const std::vector<MergeEvent>& events : local_events) {
         for (const MergeEvent& ev : events) {
             if (ev.left_position != no_position) {
@@ -626,10 +606,6 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
             }
         }
     }
-    const auto replay_t1 = std::chrono::steady_clock::now();
-    g_replay_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                       replay_t1 - replay_t0)
-                       .count();
 }
 
 void run_merge_loop_parallel(task2_state& state) {
@@ -642,18 +618,8 @@ void run_merge_loop_parallel(task2_state& state) {
         }
     }
 
-    // break down the time spent on selection and application in each round for better evaluate
-    std::int64_t select_ns = 0;
-    std::int64_t apply_ns = 0;
-    std::uint64_t rounds = 0;
-    std::uint64_t parallel_rounds = 0;
-    std::uint64_t total_positions = 0;
-
     for (;;) {
-        const auto select_t0 = std::chrono::steady_clock::now();
         const u32 best_state = pop_best_state(state, queue);
-        const auto select_t1 = std::chrono::steady_clock::now();
-        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(select_t1 - select_t0).count();
         if (best_state == no_position) {
             break;
         }
@@ -688,44 +654,15 @@ void run_merge_loop_parallel(task2_state& state) {
             state.right_state.resize(new_size, no_position);
         }
 
-        const auto apply_t0 = std::chrono::steady_clock::now();
-        total_positions += positions.size();
-        ++rounds;
         if (positions.size() >= kParallelThreshold &&
             omp_get_max_threads() > 1) {
-            ++parallel_rounds;
             process_positions_parallel(state, positions, left_token,right_token, merged_token);
         } else {
             process_positions_sequential(state, positions, left_token,right_token, merged_token);
         }
-        const auto apply_t1 = std::chrono::steady_clock::now();
-        apply_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(apply_t1 - apply_t0).count();
 
-        const auto select_t2 = std::chrono::steady_clock::now();
         push_born_states(state, queue);
-        const auto select_t3 = std::chrono::steady_clock::now();
-        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(select_t3 - select_t2).count();
     }
-
-    LOG(INFO) <<"task2 profiling: rounds="<<rounds
-              <<"parallel_rounds="<<parallel_rounds
-              <<"total_positions="<<total_positions
-              <<"select(pop+push_born)="<<(select_ns / 1000000)<<" ms"
-              <<"apply(process_positions)="<<(apply_ns / 1000000)
-              <<"ms";
-    LOG(INFO) << "task2 sequential-path staleness: positions_seen="
-              << g_seq_positions_seen
-              << " stale_and_skipped=" << g_seq_positions_stale
-              << " (" << (g_seq_positions_seen > 0
-                              ? (100.0 * static_cast<double>(g_seq_positions_stale) /
-                                 static_cast<double>(g_seq_positions_seen))
-                              : 0.0)
-              << "%)";
-    LOG(INFO) <<"task2 parallel-round breakdown: positions="
-              << g_parallel_positions
-              <<"surgery(bucket+splice, no merge step)="
-              <<(g_surgery_ns/1000000) <<" ms"
-              <<"replay="<<(g_replay_ns/1000000) <<" ms";
 }
 
 // 直接复制task2.cpp
