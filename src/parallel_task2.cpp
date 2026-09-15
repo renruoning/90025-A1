@@ -481,10 +481,39 @@ void process_positions_sequential(task2_state& state, const std::vector<u32>& po
 
 void process_positions_parallel(task2_state& state, const std::vector<u32>& positions, u32 left_token, u32 right_token, u32 merged_token) {
     const auto bucket_t0 = std::chrono::steady_clock::now();
+    const int num_threads = omp_get_max_threads();
+    std::vector<std::unordered_map<u32, std::vector<u32>>> local_by_word(
+        static_cast<std::size_t>(num_threads));
+    const std::size_t n = positions.size();
+    #pragma omp parallel
+    {
+        const int tid = omp_get_thread_num();
+        const std::size_t chunk =
+            (n + static_cast<std::size_t>(num_threads) - 1) /
+            static_cast<std::size_t>(num_threads);
+        const std::size_t lo =
+            std::min(n, static_cast<std::size_t>(tid) * chunk);
+        const std::size_t hi = std::min(n, lo + chunk);
+        std::unordered_map<u32, std::vector<u32>>& mine = local_by_word[tid];
+        mine.reserve((hi - lo) / 4 + 16);
+        for (std::size_t i = lo; i < hi; ++i) {
+            const u32 position = positions[i];
+            mine[state.word_of[position]].push_back(position);
+        }
+    }
+
     std::unordered_map<u32, std::vector<u32>> by_word;
-    by_word.reserve(positions.size());
-    for (u32 position : positions) {
-        by_word[state.word_of[position]].push_back(position);
+    by_word.reserve(positions.size() / 4 + 16);
+    for (std::unordered_map<u32, std::vector<u32>>& local : local_by_word) {
+        for (auto& entry : local) {
+            std::vector<u32>& dest = by_word[entry.first];
+            if (dest.empty()) {
+                dest = std::move(entry.second);
+            } else {
+                dest.insert(dest.end(), entry.second.begin(),
+                           entry.second.end());
+            }
+        }
     }
     std::vector<u32> active_words;
     active_words.reserve(by_word.size());
@@ -497,7 +526,6 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
                        .count();
     g_parallel_positions += positions.size();
 
-    const int num_threads=omp_get_max_threads();
     std::vector<std::vector<MergeEvent>> local_events(num_threads);
 
     // token_count 只按 frequency 累加，可以用 OpenMP reduction 代替在下面顺序回放阶段逐个操作共享状态
