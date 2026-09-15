@@ -94,12 +94,59 @@ Add your readme content below.
 -------
 
 ## Authorship
-- Student Name: John Doe
-- Login ID: johndoe
-- Student ID: 12345678
+- Student Name: Ruoning Ren
+- Login ID: ruoningr
+- Student ID: 1690503
 
 ## Instructions
-To be filled by you.
+
+### Testing correctness
+
+```bash
+make test                      # unit + differential tests (gtest)
+make smoke INPUT=test.txt      # byte-exact md5 check against a locked baseline
+                                # (locked baselines exist for test.txt, 10M.txt, 100M.txt)
+```
+
+`make smoke` also accepts a thread count via the environment, e.g.
+`OMP_NUM_THREADS=8 make smoke INPUT=10M.txt`, to confirm the parallel
+output matches the sequential reference at any thread count.
+
+### Testing performance
+
+Two ways:
+
+**1. Quick interactive check**, using a Spartan interactive session:
+
+```bash
+sinteractive -p sapphire --qos=punim0520 --time=00:40:00 --cpus-per-task=8
+# once inside the allocated node:
+cd 90025/skeleton
+make clean && make
+for t in 1 2 4 8; do
+  OMP_NUM_THREADS=$t ./bin/bpe /data/gpfs/projects/punim0520/2026/project1/100M.txt
+done
+```
+
+This is a shared (non-exclusive) allocation, so timings can be noisy if
+other jobs share the node; it is meant for quick sanity checks during
+development, not for the numbers reported in the written report.
+
+**2. Full formal benchmark**, matching Task 3's required output:
+
+```bash
+sbatch benchmark.slurm
+squeue --me                    # check status
+cat results.csv                # once the job completes
+```
+
+`benchmark.slurm` requests an `--exclusive` `sapphire` node and sweeps
+`OMP_NUM_THREADS` = 1, 2, 4, 8, 16, 32 across `10M.txt`, `100M.txt` and
+`1G.txt` by default (pass one or more file paths as arguments to
+`sbatch benchmark.slurm <file> ...` to override), writing `results.csv`
+with the columns `filename,file_md5,version,partition,threads,walltime,
+ram,output_md5`. This exclusive, full sweep is what the written
+report's measured results are based on.
 
 ## Acknowledgements
 To be filled by you.
