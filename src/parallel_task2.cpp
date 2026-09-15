@@ -24,6 +24,8 @@ namespace bpe {
         constexpr std::size_t kParallelThreshold = 20000;
 
         std::int64_t g_bucket_ns = 0;
+        std::int64_t g_bucket_scan_ns = 0;
+        std::uint64_t g_bucket_merge_entries = 0;
         std::int64_t g_surgery_ns = 0;
         std::int64_t g_replay_ns = 0;
         std::uint64_t g_parallel_positions = 0;
@@ -351,9 +353,9 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
         state.word_frequencies.push_back(split.count);
         const u32 first = static_cast<u32>(state.token.size());
 
-        for (std::size_t index = 0; index < split.chars.size(); ++index) {
-            const u32 position = static_cast<u32>(state.token.size());
-            const u32 value = split.chars[index];
+        for (std::size_t index=0; index<split.chars.size(); ++index) {
+            const u32 position=static_cast<u32>(state.token.size());
+            const u32 value=split.chars[index];
             if (value == 0) {
                 throw std::invalid_argument("word contains a NUL byte");
             }
@@ -363,13 +365,12 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
             state.word_of.push_back(word);
             state.edge_group.push_back(no_position);
             state.alive.push_back(1);
-            state.token_count[value] += split.count;
+            state.token_count[value]+=split.count;
         }
 
         const u32 sentinel = static_cast<u32>(state.token.size());
         state.token.push_back(0);
-        state.previous.push_back(split.chars.empty() ? no_position
-                                                     : sentinel - 1);
+        state.previous.push_back(split.chars.empty() ? no_position: sentinel - 1);
         state.next.push_back(no_position);
         state.word_of.push_back(word);
         state.edge_group.push_back(no_position);
@@ -387,7 +388,7 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
             const u32 left = state.token[position];
             const u32 right = state.token[next_position];
             u32& state_id = initial_state[left * byte_value_count + right];
-            if (state_id == no_position) {
+            if (state_id==no_position) {
                 state_id = create_pair_state(state, pack_pair(left, right));
             }
 
@@ -485,6 +486,7 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
     std::vector<std::unordered_map<u32, std::vector<u32>>> local_by_word(
         static_cast<std::size_t>(num_threads));
     const std::size_t n = positions.size();
+    const auto scan_t0 = std::chrono::steady_clock::now();
     #pragma omp parallel
     {
         const int tid = omp_get_thread_num();
@@ -501,6 +503,16 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
             mine[state.word_of[position]].push_back(position);
         }
     }
+    const auto scan_t1 = std::chrono::steady_clock::now();
+    g_bucket_scan_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            scan_t1 - scan_t0)
+                            .count();
+
+    std::size_t distinct_words_this_round = 0;
+    for (const auto& local : local_by_word) {
+        distinct_words_this_round += local.size();
+    }
+    g_bucket_merge_entries += distinct_words_this_round;
 
     std::unordered_map<u32, std::vector<u32>> by_word;
     by_word.reserve(positions.size() / 4 + 16);
@@ -610,7 +622,7 @@ void process_positions_parallel(task2_state& state, const std::vector<u32>& posi
                 add_edge(state, ev.left_position, state_id, ev.word,
                         ev.frequency);
             }
-            if (ev.after_position != no_position) {
+            if (ev.after_position!=no_position) {
                 const u32 state_id =
                     get_right_pair_state(state, merged_token, ev.after_token);
                 add_edge(state, ev.position, state_id, ev.word, ev.frequency);
@@ -680,36 +692,33 @@ void run_merge_loop_parallel(task2_state& state) {
         if (positions.size() >= kParallelThreshold &&
             omp_get_max_threads() > 1) {
             ++parallel_rounds;
-            process_positions_parallel(state, positions, left_token,
-                                       right_token, merged_token);
+            process_positions_parallel(state, positions, left_token,right_token, merged_token);
         } else {
-            process_positions_sequential(state, positions, left_token,
-                                         right_token, merged_token);
+            process_positions_sequential(state, positions, left_token,right_token, merged_token);
         }
         const auto apply_t1 = std::chrono::steady_clock::now();
-        apply_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        apply_t1 - apply_t0)
-                        .count();
+        apply_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(apply_t1 - apply_t0).count();
 
         const auto select_t2 = std::chrono::steady_clock::now();
         push_born_states(state, queue);
         const auto select_t3 = std::chrono::steady_clock::now();
-        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         select_t3 - select_t2)
-                         .count();
+        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(select_t3 - select_t2).count();
     }
 
-    LOG(INFO) << "task2 profiling: rounds=" << rounds
-              << " parallel_rounds=" << parallel_rounds
-              << " total_positions=" << total_positions
-              << " select(pop+push_born)=" << (select_ns / 1000000) << " ms"
-              << " apply(process_positions)=" << (apply_ns / 1000000)
-              << " ms";
-    LOG(INFO) << "task2 parallel-round breakdown: positions="
+    LOG(INFO) <<"task2 profiling: rounds="<<rounds
+              <<"parallel_rounds="<<parallel_rounds
+              <<"total_positions="<<total_positions
+              <<"select(pop+push_born)="<<(select_ns / 1000000)<<" ms"
+              <<"apply(process_positions)="<<(apply_ns / 1000000)
+              <<"ms";
+    LOG(INFO) <<"task2 parallel-round breakdown: positions="
               << g_parallel_positions
-              << " bucket=" << (g_bucket_ns / 1000000) << " ms"
-              << " surgery=" << (g_surgery_ns / 1000000) << " ms"
-              << " replay=" << (g_replay_ns / 1000000) << " ms";
+              <<"bucket="<<(g_bucket_ns / 1000000)<<" ms"
+              <<"(scan="<<(g_bucket_scan_ns / 1000000) <<" ms"
+              <<"merge="<<((g_bucket_ns-g_bucket_scan_ns)/1000000)
+              <<"ms, merge_entries="<<g_bucket_merge_entries << ")"
+              <<"surgery="<<(g_surgery_ns/1000000) <<" ms"
+              <<"replay="<<(g_replay_ns/1000000) <<" ms";
 }
 
 // 直接复制task2.cpp
@@ -725,7 +734,7 @@ void finalize_results(const task2_state& state, Results& results) {
     std::sort(live_tokens.begin(), live_tokens.end(),
               [&state](u32 left,u32 right) {
                   if (state.token_count[left] !=state.token_count[right]) {
-                      return state.token_count[left] > state.token_count[right];
+                      return state.token_count[left]>state.token_count[right];
                   }
                   return std::strcmp(state.vocabulary[left].c_str(),state.vocabulary[right].c_str()) < 0;
               });
