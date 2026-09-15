@@ -22,6 +22,8 @@ namespace bpe {
         constexpr u32 no_position= std::numeric_limits<u32>::max();
         constexpr u32 byte_value_count =256;
         constexpr std::size_t kParallelThreshold = 20000;
+        // vector 太小时，压缩的 O(size) 开销比节省的还多，改成只对大 vector 压缩
+        constexpr std::size_t kCompactionThreshold = 256;
 
         // 分块+合并的分桶方案在大轮次里合并开销很大（接近一词一次出现，合并=重做一遍分桶），改成按 word%num_threads 直接分配所有权，不再需要合并
         std::int64_t g_surgery_ns = 0;
@@ -273,8 +275,7 @@ void remove_edge(task2_state& state, u32 start, u64 frequency) {
     state.edge_group[start] = no_position;
 }
 
-void add_edge(task2_state& state, u32 start, u32 state_id, u32 word,
-              u64 frequency) {
+void add_edge(task2_state& state,u32 start,u32 state_id,u32 word,u64 frequency) {
     const u32 group = get_word_group(state, state_id, word);
     pair_state& pair = state.pair_states[state_id];
     if (state.group_count[group]++ == 0) {
@@ -285,18 +286,18 @@ void add_edge(task2_state& state, u32 start, u32 state_id, u32 word,
     state.edge_group[start] = group;
 }
 
-bool pair_is_at(const task2_state& state, u32 position, u32 left, u32 right) {
+bool pair_is_at(const task2_state& state,u32 position,u32 left,u32 right) {
     if (!is_live(state, position) || state.token[position] != left) {
         return false;
     }
-    const u32 next_position = state.next[position];
+    const u32 next_position=state.next[position];
     return is_live(state, next_position) && state.token[next_position] == right;
 }
 
-void push_born_states(task2_state& state, queue_heap& queue) {
+void push_born_states(task2_state& state,queue_heap& queue) {
     for (u32 state_id : state.born_states) {
-        const pair_state& pair = state.pair_states[state_id];
-        if (pair.word_count >= 2 && pair.count != 0) {
+        const pair_state& pair=state.pair_states[state_id];
+        if (pair.word_count>=2&&pair.count!=0) {
             queue.push(queue_entry{pair.count, pair.fingerprint, state_id});
         }
     }
@@ -305,7 +306,7 @@ void push_born_states(task2_state& state, queue_heap& queue) {
 
 u32 pop_best_state(task2_state& state, queue_heap& queue) {
     while (!queue.empty()) {
-        const queue_entry entry = queue.top();
+        const queue_entry entry=queue.top();
         queue.pop();
         pair_state& pair = state.pair_states[entry.state];
         if (pair.word_count < 2 || pair.count == 0) {
@@ -314,15 +315,16 @@ u32 pop_best_state(task2_state& state, queue_heap& queue) {
         if (entry.count != pair.count) {
             // remove_edge 只做懒删除；重新入队时用 pair_is_at() 过滤失效条目，减少后续扫描。
             // alive/token 单向变化，失效条目不会恢复。
-            const u32 left_token = pair_left(pair.key);
-            const u32 right_token = pair_right(pair.key);
-            std::vector<u32>& positions = pair.positions;
-            positions.erase(
-                std::remove_if(positions.begin(), positions.end(),
-                               [&state, left_token, right_token](u32 position) {
-                                   return !pair_is_at(state, position, left_token, right_token);
-                               }),
-                positions.end());
+            if (pair.positions.size() > kCompactionThreshold) {
+                const u32 left_token=pair_left(pair.key);
+                const u32 right_token=pair_right(pair.key);
+                std::vector<u32>& positions = pair.positions;
+                positions.erase(
+                    std::remove_if(positions.begin(), positions.end(),[&state, left_token, right_token](u32 position) {
+                        return !pair_is_at(state, position, left_token, right_token);
+                    }),
+                    positions.end());
+            }
             queue.push(queue_entry{pair.count, pair.fingerprint, entry.state});
             continue;
         }
@@ -373,33 +375,31 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
         for (std::size_t index=0; index<split.chars.size(); ++index) {
             const u32 position=static_cast<u32>(state.token.size());
             const u32 value=split.chars[index];
-            if (value == 0) {
+            if (value==0) {
                 throw std::invalid_argument("word contains a NUL byte");
             }
             state.token.push_back(value);
-            state.previous.push_back(index == 0 ? no_position : position - 1);
-            state.next.push_back(position + 1);
+            state.previous.push_back(index==0 ? no_position : position-1);
+            state.next.push_back(position+1);
             state.word_of.push_back(word);
             state.edge_group.push_back(no_position);
             state.alive.push_back(1);
             state.token_count[value]+=split.count;
         }
-
-        const u32 sentinel = static_cast<u32>(state.token.size());
+        const u32 sentinel=static_cast<u32>(state.token.size());
         state.token.push_back(0);
         state.previous.push_back(split.chars.empty() ? no_position: sentinel - 1);
         state.next.push_back(no_position);
         state.word_of.push_back(word);
         state.edge_group.push_back(no_position);
         state.alive.push_back(0);
-
         if (split.chars.empty()) {
             continue;
         }
-        for (u32 position = first; is_live(state, position);
-             position = state.next[position]) {
-            const u32 next_position = state.next[position];
-            if (!is_live(state, next_position)) {
+        for (u32 position=first; is_live(state, position);
+             position=state.next[position]) {
+            const u32 next_positio= state.next[position];
+            if (!is_live(state,next_position)) {
                 break;
             }
             const u32 left = state.token[position];
