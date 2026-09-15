@@ -63,7 +63,8 @@ struct pair_state {
     u64 key = 0;
     u64 count =0;
     u32 word_count= 0;
-    std::vector<u32> positions;
+    u32 positions_head = no_position;
+    u32 positions_tail = no_position;
     u32 last_word=no_position;
     u32 last_group=no_position;
     u64 fingerprint = 0;
@@ -148,6 +149,9 @@ struct task2_state {
     std::vector<u32> next;
     std::vector<u32> word_of;
     std::vector<u32> edge_group;
+    // 按 position 索引，所有 pair_state 共用，配合 positions_head/tail 组成链表
+    std::vector<u32> pos_prev_in_pair;
+    std::vector<u32> pos_next_in_pair;
     std::vector<u8> alive;
     std::vector<u64> token_count;
     std::vector<std::string> vocabulary;
@@ -183,45 +187,69 @@ bool is_live(const task2_state& state, u32 position) {
     return position != no_position && state.alive[position] != 0;
 }
 
-u32 create_pair_state(task2_state& state, u64 key) {
-    const u32 state_id = static_cast<u32>(state.pair_states.size());
+// 把 position 接到 pair 链表尾部，O(1)
+void link_append(task2_state& state,pair_state& pair,u32 position) {
+    state.pos_prev_in_pair[position]=pair.positions_tail;
+    state.pos_next_in_pair[position]=no_position;
+    if (pair.positions_tail!=no_position) {
+        state.pos_next_in_pair[pair.positions_tail]=position;
+    } else {
+        pair.positions_head=position;
+    }
+    pair.positions_tail=position;
+}
+
+// 把 position 从 pair 链表里摘掉，O(1)，不影响其他成员的相对顺序
+void link_remove(task2_state& state,pair_state& pair,u32 position) {
+    const u32 prev=state.pos_prev_in_pair[position];
+    const u32 next=state.pos_next_in_pair[position];
+    if (prev!=no_position) {
+        state.pos_next_in_pair[prev]=next;
+    } else {
+        pair.positions_head=next;
+    }
+    if (next != no_position) {
+        state.pos_prev_in_pair[next]=prev;
+    } else {
+        pair.positions_tail=prev;
+    }
+}
+
+u32 create_pair_state(task2_state& state,u64 key) {
+    const u32 state_id=static_cast<u32>(state.pair_states.size());
     state.pair_states.push_back(pair_state{});
-    pair_state& pair = state.pair_states.back();
-    pair.key = key;
+    pair_state& pair=state.pair_states.back();
+    pair.key=key;
     pair.fingerprint = text_fingerprint(state.vocabulary[pair_left(key)],state.vocabulary[pair_right(key)]);state.born_states.push_back(state_id);
     return state_id;
 }
 
-u32 get_left_pair_state(task2_state& state, u32 left, u32 merged) {
+u32 get_left_pair_state(task2_state& state,u32 left,u32 merged) {
     if (left == merged) {
-        if (state.same_stamp != merged) {
-            state.same_stamp = merged;
-            state.same_state =
-                create_pair_state(state, pack_pair(merged, merged));
+        if (state.same_stamp!=merged) {
+            state.same_stamp=merged;
+            state.same_state=create_pair_state(state,pack_pair(merged, merged));
         }
         return state.same_state;
     }
-    if (state.left_stamp[left] != merged) {
-        state.left_stamp[left] = merged;
-        state.left_state[left] =
-            create_pair_state(state, pack_pair(left, merged));
+    if (state.left_stamp[left]!=merged) {
+        state.left_stamp[left]= merged;
+        state.left_state[left] =create_pair_state(state, pack_pair(left, merged));
     }
     return state.left_state[left];
 }
 
-u32 get_right_pair_state(task2_state& state, u32 merged, u32 right) {
+u32 get_right_pair_state(task2_state& state,u32 merged,u32 right) {
     if (right == merged) {
-        if (state.same_stamp != merged) {
-            state.same_stamp = merged;
-            state.same_state =
-                create_pair_state(state, pack_pair(merged, merged));
+        if (state.same_stamp!=merged) {
+            state.same_stamp=merged;
+            state.same_state=create_pair_state(state, pack_pair(merged, merged));
         }
         return state.same_state;
     }
     if (state.right_stamp[right] != merged) {
-        state.right_stamp[right] = merged;
-        state.right_state[right] =
-            create_pair_state(state, pack_pair(merged, right));
+        state.right_stamp[right]= merged;
+        state.right_state[right]=create_pair_state(state, pack_pair(merged, right));
     }
     return state.right_state[right];
 }
@@ -253,6 +281,7 @@ void remove_edge(task2_state& state, u32 start, u64 frequency) {
         std::abort();
     }
     pair_state& pair = state.pair_states[state.group_state[group]];
+    link_remove(state, pair, start);
     --state.group_count[group];
     if (pair.count < frequency) {
         std::abort();
@@ -280,7 +309,7 @@ void add_edge(task2_state& state,u32 start,u32 state_id,u32 word,u64 frequency) 
         ++pair.word_count;
     }
     pair.count += frequency;
-    pair.positions.push_back(start);
+    link_append(state, pair, start);
     state.edge_group[start] = group;
 }
 
@@ -347,6 +376,8 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
     state.next.reserve(slot_count);
     state.word_of.reserve(slot_count);
     state.edge_group.reserve(slot_count);
+    state.pos_prev_in_pair.reserve(slot_count);
+    state.pos_next_in_pair.reserve(slot_count);
     state.alive.reserve(slot_count);
     state.group_state.reserve(slot_count);
     state.group_count.reserve(slot_count);
@@ -368,6 +399,8 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
             state.next.push_back(position+1);
             state.word_of.push_back(word);
             state.edge_group.push_back(no_position);
+            state.pos_prev_in_pair.push_back(no_position);
+            state.pos_next_in_pair.push_back(no_position);
             state.alive.push_back(1);
             state.token_count[value]+=split.count;
         }
@@ -377,6 +410,8 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
         state.next.push_back(no_position);
         state.word_of.push_back(word);
         state.edge_group.push_back(no_position);
+        state.pos_prev_in_pair.push_back(no_position);
+        state.pos_next_in_pair.push_back(no_position);
         state.alive.push_back(0);
         if (split.chars.empty()) {
             continue;
@@ -408,7 +443,7 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
             }
             ++state.group_count[group];
             pair.count += split.count;
-            pair.positions.push_back(position);
+            link_append(state, pair, position);
             state.edge_group[position] = group;
         }
     }
@@ -618,30 +653,35 @@ void run_merge_loop_parallel(task2_state& state) {
         const auto select_t0 = std::chrono::steady_clock::now();
         const u32 best_state = pop_best_state(state, queue);
         const auto select_t1 = std::chrono::steady_clock::now();
-        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         select_t1 - select_t0)
-                         .count();
+        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(select_t1 - select_t0).count();
         if (best_state == no_position) {
             break;
         }
 
         const u64 best_key = state.pair_states[best_state].key;
-        std::vector<u32> positions =
-            std::move(state.pair_states[best_state].positions);
+        // 把链表走一遍转成 vector 给 process_positions_* 用；链表里全是存活成员，不会有过期数据
+        std::vector<u32> positions;
+        {
+            pair_state& best_pair = state.pair_states[best_state];
+            for (u32 p = best_pair.positions_head; p != no_position;
+                 p = state.pos_next_in_pair[p]) {
+                positions.push_back(p);
+            }
+            best_pair.positions_head = no_position;
+            best_pair.positions_tail = no_position;
+        }
         const u32 left_token = pair_left(best_key);
         const u32 right_token = pair_right(best_key);
         const u32 merged_token = static_cast<u32>(state.vocabulary.size());
 
         std::string merged_text;
-        merged_text.reserve(state.vocabulary[left_token].size() +
-                            state.vocabulary[right_token].size());
+        merged_text.reserve(state.vocabulary[left_token].size()+ state.vocabulary[right_token].size());
         merged_text.append(state.vocabulary[left_token]);
         merged_text.append(state.vocabulary[right_token]);
         state.vocabulary.push_back(std::move(merged_text));
         state.token_count.push_back(0);
         if (state.left_stamp.size() <= merged_token) {
-            const std::size_t new_size = std::max<std::size_t>(
-                state.left_stamp.size() * 2, merged_token + 1024);
+            const std::size_t new_size = std::max<std::size_t>(state.left_stamp.size() * 2, merged_token + 1024);
             state.left_stamp.resize(new_size, no_position);
             state.left_state.resize(new_size, no_position);
             state.right_stamp.resize(new_size, no_position);
