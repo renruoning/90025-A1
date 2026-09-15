@@ -306,21 +306,11 @@ u32 pop_best_state(task2_state& state, queue_heap& queue) {
     while (!queue.empty()) {
         const queue_entry entry=queue.top();
         queue.pop();
-        pair_state& pair = state.pair_states[entry.state];
+        const pair_state& pair = state.pair_states[entry.state];
         if (pair.word_count < 2 || pair.count == 0) {
             continue;
         }
         if (entry.count != pair.count) {
-            // remove_edge 只做懒删除；重新入队时用 pair_is_at() 过滤失效条目，减少后续扫描。
-            // alive/token 单向变化，失效条目不会恢复。
-            const u32 left_token=pair_left(pair.key);
-            const u32 right_token=pair_right(pair.key);
-            std::vector<u32>& positions = pair.positions;
-            positions.erase(
-                std::remove_if(positions.begin(), positions.end(),[&state, left_token, right_token](u32 position) {
-                    return !pair_is_at(state, position, left_token, right_token);
-                }),
-                positions.end());
             queue.push(queue_entry{pair.count, pair.fingerprint, entry.state});
             continue;
         }
