@@ -1,6 +1,8 @@
 #include "bpe.h"
+#include "absl/log/log.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -581,8 +583,20 @@ void run_merge_loop_parallel(task2_state& state) {
         }
     }
 
+    // break down the time spent on selection and application in each round for better evaluate
+    std::int64_t select_ns = 0;
+    std::int64_t apply_ns = 0;
+    std::uint64_t rounds = 0;
+    std::uint64_t parallel_rounds = 0;
+    std::uint64_t total_positions = 0;
+
     for (;;) {
+        const auto select_t0 = std::chrono::steady_clock::now();
         const u32 best_state = pop_best_state(state, queue);
+        const auto select_t1 = std::chrono::steady_clock::now();
+        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         select_t1 - select_t0)
+                         .count();
         if (best_state == no_position) {
             break;
         }
@@ -610,17 +624,37 @@ void run_merge_loop_parallel(task2_state& state) {
             state.right_state.resize(new_size, no_position);
         }
 
+        const auto apply_t0 = std::chrono::steady_clock::now();
+        total_positions += positions.size();
+        ++rounds;
         if (positions.size() >= kParallelThreshold &&
             omp_get_max_threads() > 1) {
+            ++parallel_rounds;
             process_positions_parallel(state, positions, left_token,
                                        right_token, merged_token);
         } else {
             process_positions_sequential(state, positions, left_token,
                                          right_token, merged_token);
         }
+        const auto apply_t1 = std::chrono::steady_clock::now();
+        apply_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        apply_t1 - apply_t0)
+                        .count();
 
+        const auto select_t2 = std::chrono::steady_clock::now();
         push_born_states(state, queue);
+        const auto select_t3 = std::chrono::steady_clock::now();
+        select_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         select_t3 - select_t2)
+                         .count();
     }
+
+    LOG(INFO) << "task2 profiling: rounds=" << rounds
+              << " parallel_rounds=" << parallel_rounds
+              << " total_positions=" << total_positions
+              << " select(pop+push_born)=" << (select_ns / 1000000) << " ms"
+              << " apply(process_positions)=" << (apply_ns / 1000000)
+              << " ms";
 }
 
 // 直接复制task2.cpp
