@@ -295,11 +295,6 @@ void build_state(const std::vector<CharSplit>& splits,task2_state& state) {
     if (splits.size()>=no_position) {
         throw std::length_error("too many distinct words");
     }
-
-    state.vocabulary.reserve(byte_value_count + splits.size());
-    state.token_count.reserve(byte_value_count + splits.size());
-    state.pair_states.reserve(splits.size());
-
     state.vocabulary.resize(byte_value_count);
     state.token_count.assign(byte_value_count,0);
     for (u32 value = 1;value < byte_value_count;++value) {

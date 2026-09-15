@@ -27,6 +27,10 @@ namespace bpe {
         std::int64_t g_surgery_ns = 0;
         std::int64_t g_replay_ns = 0;
         std::uint64_t g_parallel_positions = 0;
+
+        // pair_state.positions 是懒删除的，一个 position 可能在被选中前就被别的轮次合并掉、变成过期数据，靠 pair_is_at() 才发现并跳过；这里统计这部分浪费的迭代占比
+        std::uint64_t g_seq_positions_seen = 0;
+        std::uint64_t g_seq_positions_stale = 0;
 u64 pack_pair(u32 left, u32 right) {
     return (static_cast<u64>(left) << 32) | static_cast<u64>(right);
 }
@@ -321,6 +325,10 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
         throw std::length_error("too many distinct words");
     }
 
+    state.vocabulary.reserve(byte_value_count + splits.size());
+    state.token_count.reserve(byte_value_count + splits.size());
+    state.pair_states.reserve(splits.size());
+
     state.vocabulary.resize(byte_value_count);
     state.token_count.assign(byte_value_count, 0);
     for (u32 value = 1; value < byte_value_count; ++value) {
@@ -431,8 +439,10 @@ struct MergeEvent{
 void process_positions_sequential(task2_state& state, const std::vector<u32>& positions, u32 left_token, u32 right_token, u32 merged_token) {
     u32 current_word = no_position;
     u64 frequency = 0;
+    g_seq_positions_seen += positions.size();
     for (u32 position : positions) {
         if (!pair_is_at(state, position, left_token, right_token)) {
+            ++g_seq_positions_stale;
             continue;
         }
         const u32 right_position = state.next[position];
@@ -667,6 +677,14 @@ void run_merge_loop_parallel(task2_state& state) {
               <<"select(pop+push_born)="<<(select_ns / 1000000)<<" ms"
               <<"apply(process_positions)="<<(apply_ns / 1000000)
               <<"ms";
+    LOG(INFO) << "task2 sequential-path staleness: positions_seen="
+              << g_seq_positions_seen
+              << " stale_and_skipped=" << g_seq_positions_stale
+              << " (" << (g_seq_positions_seen > 0
+                              ? (100.0 * static_cast<double>(g_seq_positions_stale) /
+                                 static_cast<double>(g_seq_positions_seen))
+                              : 0.0)
+              << "%)";
     LOG(INFO) <<"task2 parallel-round breakdown: positions="
               << g_parallel_positions
               <<"surgery(bucket+splice, no merge step)="
