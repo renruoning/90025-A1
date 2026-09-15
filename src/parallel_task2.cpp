@@ -23,9 +23,7 @@ namespace bpe {
         constexpr u32 byte_value_count =256;
         constexpr std::size_t kParallelThreshold = 20000;
 
-        std::int64_t g_bucket_ns = 0;
-        std::int64_t g_bucket_scan_ns = 0;
-        std::uint64_t g_bucket_merge_entries = 0;
+        // 分块+合并的分桶方案在大轮次里合并开销很大（接近一词一次出现，合并=重做一遍分桶），改成按 word%num_threads 直接分配所有权，不再需要合并
         std::int64_t g_surgery_ns = 0;
         std::int64_t g_replay_ns = 0;
         std::uint64_t g_parallel_positions = 0;
@@ -481,80 +479,38 @@ void process_positions_sequential(task2_state& state, const std::vector<u32>& po
 }
 
 void process_positions_parallel(task2_state& state, const std::vector<u32>& positions, u32 left_token, u32 right_token, u32 merged_token) {
-    const auto bucket_t0 = std::chrono::steady_clock::now();
+    // 按 word%num_threads 直接分配所有权，每个线程的本地 map 天然就是最终结果，不用再合并
     const int num_threads = omp_get_max_threads();
-    std::vector<std::unordered_map<u32, std::vector<u32>>> local_by_word(
+    const u32 num_threads_u32 = static_cast<u32>(num_threads);
+    std::vector<std::vector<MergeEvent>> local_events(
         static_cast<std::size_t>(num_threads));
-    const std::size_t n = positions.size();
-    const auto scan_t0 = std::chrono::steady_clock::now();
-    #pragma omp parallel
-    {
-        const int tid = omp_get_thread_num();
-        const std::size_t chunk =
-            (n + static_cast<std::size_t>(num_threads) - 1) /
-            static_cast<std::size_t>(num_threads);
-        const std::size_t lo =
-            std::min(n, static_cast<std::size_t>(tid) * chunk);
-        const std::size_t hi = std::min(n, lo + chunk);
-        std::unordered_map<u32, std::vector<u32>>& mine = local_by_word[tid];
-        mine.reserve((hi - lo) / 4 + 16);
-        for (std::size_t i = lo; i < hi; ++i) {
-            const u32 position = positions[i];
-            mine[state.word_of[position]].push_back(position);
-        }
-    }
-    const auto scan_t1 = std::chrono::steady_clock::now();
-    g_bucket_scan_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            scan_t1 - scan_t0)
-                            .count();
-
-    std::size_t distinct_words_this_round = 0;
-    for (const auto& local : local_by_word) {
-        distinct_words_this_round += local.size();
-    }
-    g_bucket_merge_entries += distinct_words_this_round;
-
-    std::unordered_map<u32, std::vector<u32>> by_word;
-    by_word.reserve(positions.size() / 4 + 16);
-    for (std::unordered_map<u32, std::vector<u32>>& local : local_by_word) {
-        for (auto& entry : local) {
-            std::vector<u32>& dest = by_word[entry.first];
-            if (dest.empty()) {
-                dest = std::move(entry.second);
-            } else {
-                dest.insert(dest.end(), entry.second.begin(),
-                           entry.second.end());
-            }
-        }
-    }
-    std::vector<u32> active_words;
-    active_words.reserve(by_word.size());
-    for(const auto& entry:by_word){
-        active_words.push_back(entry.first);
-    }
-    const auto bucket_t1 = std::chrono::steady_clock::now();
-    g_bucket_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
-                       bucket_t1 - bucket_t0)
-                       .count();
     g_parallel_positions += positions.size();
 
-    std::vector<std::vector<MergeEvent>> local_events(num_threads);
-
-    // token_count 只按 frequency 累加，可以用 OpenMP reduction 代替在下面顺序回放阶段逐个操作共享状态
     u64 total_frequency = 0;
-
     const auto surgery_t0 = std::chrono::steady_clock::now();
-    #pragma omp parallel
+    #pragma omp parallel reduction(+:total_frequency)
     {
         const int tid = omp_get_thread_num();
-        std::vector<MergeEvent>& events = local_events[tid];
-        events.reserve(positions.size() / static_cast<std::size_t>(num_threads) + 16);
+        const u32 tid_u32 = static_cast<u32>(tid);
 
-        #pragma omp for schedule(dynamic, 64) reduction(+:total_frequency)
-        for (std::size_t idx = 0; idx < active_words.size(); ++idx) {
-            const u32 word = active_words[idx];
+        std::unordered_map<u32, std::vector<u32>> mine_by_word;
+        mine_by_word.reserve(
+            positions.size() / static_cast<std::size_t>(num_threads) / 2 +
+            16);
+        for (u32 position : positions) {
+            const u32 word = state.word_of[position];
+            if (word % num_threads_u32 == tid_u32) {
+                mine_by_word[word].push_back(position);
+            }
+        }
+
+        std::vector<MergeEvent>& events = local_events[tid];
+        events.reserve(mine_by_word.size() * 2 + 16);
+
+        for (const auto& entry : mine_by_word) {
+            const u32 word = entry.first;
             const u64 frequency = state.word_frequencies[word];
-            for (u32 position : by_word.at(word)) {
+            for (u32 position : entry.second) {
                 if (!pair_is_at(state, position, left_token, right_token)) {
                     continue;
                 }
@@ -713,11 +669,8 @@ void run_merge_loop_parallel(task2_state& state) {
               <<"ms";
     LOG(INFO) <<"task2 parallel-round breakdown: positions="
               << g_parallel_positions
-              <<"bucket="<<(g_bucket_ns / 1000000)<<" ms"
-              <<"(scan="<<(g_bucket_scan_ns / 1000000) <<" ms"
-              <<"merge="<<((g_bucket_ns-g_bucket_scan_ns)/1000000)
-              <<"ms, merge_entries="<<g_bucket_merge_entries << ")"
-              <<"surgery="<<(g_surgery_ns/1000000) <<" ms"
+              <<"surgery(bucket+splice, no merge step)="
+              <<(g_surgery_ns/1000000) <<" ms"
               <<"replay="<<(g_replay_ns/1000000) <<" ms";
 }
 
