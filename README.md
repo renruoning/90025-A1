@@ -149,4 +149,37 @@ ram,output_md5`. This exclusive, full sweep is what the written
 report's measured results are based on.
 
 ## Acknowledgements
-To be filled by you.
+### Human assistance
+
+No code, designs, or solutions were shared with or received from any
+other student, tutor, lecturer, or friend. The only outside input was
+reading a clarification thread on Ed Discussion, which established that
+Task 1's word-count output order is unspecified by the spec.
+
+### AI assistance
+
+Claude Code was used in this project. All AI answers were reviewed by myself before accepted. The tables below group the substantive prompts and what Claude Code did in response by purpose; routine status checks (e.g. confirming a SLURM job's queue position) are omitted for brevity. 
+
+#### Understanding the assignment background
+
+| My prompt (summarised and translated) | What Claude Code did |
+|---|---|
+| "查看C:\...\2026comp90025p1bpe文件" (read this specific, more detailed spec PDF). | Read the full document, including the mark allocation table, the H1/H2/H3/P speed-up grading curve (relative to the teaching team's own sequential baseline, not my own internal ratio), and rules R7.1–R8.4 (correctness/parallelism gates, version control, compile/run, submission format, AI-disclosure). |
+| "评分标准里是不是说了benchmark要输出指定格式的结果来着" / "8列是哪8列" (does the rubric specify a required results.csv format, and what are the 8 columns). | Quoted the exact Task 3 requirement (script name, `results.csv` filename, and the 8 required column names in order) and confirmed the submitted `benchmark.slurm` matches it exactly. |
+| "评分标准你看了吗，是不是对多次commit有要求" (does the rubric require frequent commits). | Quoted rule R7.3 (frequent commits, student-email author address) and the submission section explaining the whole `.git` history travels inside the submitted tarball, so markers verify it by running `git log` themselves — no separate report mention or remote repo link is needed. |
+
+#### Analyzing benchmark and run results
+
+| My prompt (summarised/translated) | What Claude Code did |
+|---|---|
+| "我已经在spartan上面做了初步测试，已经有了results.csv，但是我不知道怎么阅读" (I have an initial results.csv from Spartan but don't know how to read it). | Parsed the CSV, identified Task 2's parallel implementation was slower than sequential, and proposed a profiling-first optimization plan. |
+| Pasted raw `LOG(INFO)` profiling output and `slurm-*.out` files at several points during development. | Interpreted the phase-level timing breakdowns (select vs. apply, bucketing scan vs. merge) and staleness counters to locate the actual bottleneck each time, rather than guessing. |
+| "你进入windows的这个路径...里面有三个out文件和两个result.csv文件...result2是新的结果你还没看" (pointed to newly copied benchmark output files). | Read both independent exclusive-node `sbatch` runs, cross-checked `output_md5` against the locked reference hashes for every file/thread combination, and averaged the two runs' wall times into the numbers used in the report. |
+| Reported a `sbatch` job queued days past the deadline while waiting for a 4G.txt data point. | Recommended cancelling the job and dropping the (non-mandatory) 4G.txt figure rather than risk missing the deadline. |
+
+#### Git version control
+
+| My prompt (summarised/translated) | What Claude Code did |
+|---|---|
+| "先记录一下成果，然后再回退版本，但是不撤销commit，只是把代码回退回去" (record findings, then roll back the code without deleting the commits). | Used `git revert` to undo a compaction experiment's code once measurement showed it was net-neutral, while preserving both original commits in history. |
+| "你修改一下benchmark的参数，然后...push一下" (make a change to benchmark.slurm parameter and push it). | Committed and pushed directly to `origin/main`, with commit messages documenting the measured data behind each change (e.g. the `--time` budget reduction). |
