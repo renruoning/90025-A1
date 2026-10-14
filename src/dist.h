@@ -37,6 +37,10 @@ int worker_of(const Byte* s, std::size_t n);
 // rank owns (sorted per worker), not the whole corpus.
 void distributed_task1(std::vector<Byte>& input, Results& results);
 
+
+// Step 4: BPE merge loop with 256-pair rounds, for exactly one worker.
+void single_worker_task2(const std::vector<CharSplit>& splits, Results& results);
+
 }
 
 #endif
