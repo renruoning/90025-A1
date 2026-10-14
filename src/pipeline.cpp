@@ -1,4 +1,5 @@
 #include "bpe.h"
+#include "dist.h"
 #include "md5.h"
 #include "absl/log/log.h"
 #include <chrono>
@@ -8,7 +9,6 @@
 #include <sys/resource.h>
 namespace bpe {
 namespace {
-
 std::int64_t elapsed_ms(const std::chrono::steady_clock::time_point& start,
                         const std::chrono::steady_clock::time_point& end) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
@@ -43,6 +43,7 @@ int run_cli(int argc, char** argv) {
         return 2;
     }
     try {
+        setup_threads();
         LOG(INFO) << "OpenMP threads: " << omp_get_max_threads()
                   << "; MPI rank " << mpi_rank() << " of " << mpi_size();
         // Only rank 0 reads the corpus (specification, Data Specification).
