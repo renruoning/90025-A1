@@ -61,6 +61,7 @@ int run_cli(int argc, char** argv) {
             std::chrono::steady_clock::now();
         LOG(INFO) << "read " << input.size() << " bytes from " << argv[1];
         LOG(INFO) << "load file: " << elapsed_ms(t_load0, t_load1) << " ms";
+        distribute_input(input);
         // TODO(Project 2): the merge decision is global, so every rank must
         // reach the same answer as a single process would. See parallel_task1
         // and parallel_task2 in src/parallel.cpp.
