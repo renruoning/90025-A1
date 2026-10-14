@@ -1,4 +1,5 @@
 #include "bpe.h"
+#include "dist.h"
 #include "absl/log/log.h"
 #include <chrono>
 namespace bpe {
@@ -12,6 +13,10 @@ std::int64_t elapsed_ms(const std::chrono::steady_clock::time_point& start,
 // Project 2: word counting and character splitting over every rank, combined
 // into the global result (rule R1.2).
 void parallel_task1(std::vector<Byte>& input, Results& results) {
+#ifdef BPE_HAVE_MPI
+    distributed_task1(input, results);
+    return;
+#endif
     const std::chrono::steady_clock::time_point t0 =
         std::chrono::steady_clock::now();
     const std::vector<Word> words = split_words(input);

@@ -28,6 +28,15 @@ std::vector<std::size_t> split_points(const Byte* buf, std::size_t n,
 // get their share back. Does nothing on a single rank.
 void distribute_input(std::vector<Byte>& input);
 
+
+// Which worker owns a word (hash of its bytes, same on every rank).
+int worker_of(const Byte* s, std::size_t n);
+
+// Step 3: count the words of this rank's share, send each word to the worker
+// that owns it, and merge there. Afterwards `results` holds only the words this
+// rank owns (sorted per worker), not the whole corpus.
+void distributed_task1(std::vector<Byte>& input, Results& results);
+
 }
 
 #endif

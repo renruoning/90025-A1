@@ -71,10 +71,14 @@ void setup_threads() {
                   << g_first[size] << " workers";
     }
 }
-int num_workers() { return g_first.empty() ? 1 : g_first.back(); }
-int threads_of(int rank) { return g_threads[rank]; }
-int first_worker(int rank) { return g_first[rank]; }
+// without setup_threads (e.g. unit tests) behave like one rank, default threads
+int num_workers() { return g_first.empty() ? omp_get_max_threads() : g_first.back(); }
+int threads_of(int rank) {
+    return g_threads.empty() ? omp_get_max_threads() : g_threads[rank];
+}
+int first_worker(int rank) { return g_first.empty() ? 0 : g_first[rank]; }
 int worker_rank(int worker) {
+    if (g_first.empty()) return 0;
     int r = 0;
     while (g_first[r + 1] <= worker) ++r;
     return r;
