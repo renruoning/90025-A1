@@ -1,185 +1,209 @@
-# COMP90025 2026 Project 1 — BPE skeleton
+# COMP90025 2026 Project 2 — BPE skeleton (MPI + OpenMP)
 
-This is the provided skeleton for the byte-pair encoding (BPE) project. It
-contains the sequential reference implementation of every task, the
-`Results` data structure that holds each task's results (rule R6.1), and a
-Makefile. Your only task is to replace the two parallel API entries in
-`src/parallel.cpp` with OpenMP implementations (rule R7.2), namely:
-1. `parallel_task1` including `split_words`
+A modified Project 1 skeleton: the sequential implementation of both tasks, the
+`Results` structure (rule R1.2), a minimal MPI entry (`src/mpi_entry.cpp`) and a
+Makefile. You replace the two parallel API entries in `src/parallel.cpp` with
+hybrid MPI and OpenMP implementations (rule R2.3):
+
+1. `parallel_task1`, including `split_words`
 2. `parallel_task2`
+
+The skeleton does not distribute the corpus: rank 0 reads it and the other ranks
+start empty (`src/pipeline.cpp`). That distribution is your work. A submission
+that never calls MPI scores 0 for the whole project (rule R2.2).
+
+## What is new from Project 1, and why it can be faster
+
+Project 1 merged **one** pair per step: find the most frequent eligible pair,
+merge it, find the next. Every step reads counts the previous step changed, so
+Task 2 is a sequential loop that no number of threads can spread out.
+
+Project 2 changes that one rule (specification, Task 2): **each round selects the
+256 most frequent eligible pairs, merges all 256, and only then selects the next
+256**, as a snapshot taken before any of them is merged. That one change is what
+makes a cluster worth using:
+
+* one global selection per 256 merges instead of one per merge, and it is done
+  once by agreement rather than by every rank independently;
+* the 256 pairs are disjoint, so every rank can merge its own occurrences of all
+  of them at the same time, and the frequency changes travel once per round
+  instead of once per merge;
+* the counts still have to agree, so deltas are exchanged every round — that
+  communication, and the synchronisation around it, is the part the
+  specification asks you to make cheap.
+
+The output is **not** Project 1's: 256 pairs merged together can differ from 256
+merged one at a time, and the specification's own worked example answers
+differently under the two rules. The reference is this rule run on one process --
+`make seq`, built from `src/task2.cpp`, which already implements it.
 
 ## Layout
 
 ```
-src/bpe.h          public API + the Results data structure (rule R6.1)
+src/bpe.h          public API + Results (rule R1.2)
 src/corpus.cpp     input reading + word splitting (provided)
-src/task1.cpp      Task 1 sequential reference: word counts + character splits (provided)
-src/task2.cpp      Task 2 sequential reference: BPE merge loop (provided, self-contained)
-src/output.cpp        Task 2 output.txt writing + Task 1 stdout dump (provided)
+src/task1.cpp      Task 1 sequential reference (provided)
+src/task2.cpp      Task 2 sequential reference: the 256-pair round (provided)
+src/output.cpp     output.txt writing + Task 1 dump (provided)
 src/pipeline.cpp   pipeline + CLI (provided)
-src/parallel.cpp   update the two parallel API entries (you can create new files in src/ if you want, but do not modify the provided sequential reference)
-abseil/            vendored Abseil logging subset (provided; see "Logging")
+src/mpi_entry.cpp  MPI start-up: init, finalize, rank, size (provided)
+src/parallel.cpp   the two parallel API entries — your work
+abseil/            vendored Abseil logging subset
 Makefile
 ```
+
+`src/task2.cpp` implements **Project 2's** rule: the 256-pair round. Your parallel
+`parallel_task2` has to reproduce its output byte for byte, and it is the place to
+read the rule if the specification's description is not enough.
 
 ## Build and run
 
 ```
-make              # builds bin/bpe
-make run INPUT=file.txt          # run bin/bpe on a corpus
-make bench INPUT=file.txt        # wall-time the run with 1 2 4 8 16 32 OpenMP threads
+make                    # bin/bpe, the MPI build
+make run INPUT=file.txt
+make seq INPUT=file.txt # bin/bpe_seq, the sequential reference
+make bench INPUT=file.txt
 make clean
 ```
 
-`bin/bpe input.txt` prints walltimes and writes `output.txt`
-in the current directory. `output.txt` has one `token count` line per token,
-ordered by decreasing count, ties by the lexicographically smallest token
-first. For a fixed input the output is byte-exact, and the evaluation compares
-your output against the sequential reference and the spec's expected output.
-
-
-## Style expectations (Google C++, format-only)
-
-Style is **not marked**. These targets are advisory and never
-fail a build:
+On Spartan, `module load GCC OpenMPI` first. `make` uses `mpicxx` when it is on
+`PATH`; without it the build falls back to `g++` and `src/mpi_entry.cpp` becomes
+a single-rank stub, so the skeleton still builds and its tests still run.
 
 ```
-make format   # apply Google C++ formatting to all C++ files (auto-fix)
-make check    # advisory: report whether all files already match (exits 0)
+make mpi INPUT=file.txt RANKS=3
+srun --nodes=1 --ntasks=4 --cpus-per-task=4 --time=00:05:00 ./bin/bpe file.txt
 ```
 
-The repository ships a `.clang-format` derived from the Google C++ Style Guide
-(clang-format 14.0.6), tuned to the skeleton's 4-space indentation. Running
-`make format` before committing is recommended so everyone's code reads the
-same way — it is purely mechanical and cannot change behaviour.
+The graded configurations put **every rank of a configuration on one node**, on
+different cores: they vary how the machine's 16 OpenMP threads are split into
+ranks and thread teams, and no graded run touches the network. A step asks for
+`--cpus-per-task` = the largest count in its tuple, for every rank, so it needs
+`ranks x largest` CPUs — `{2,4,10}` needs 30 while running 16 threads.
 
-## Reading and splitting
+### The sequential reference
 
-`read_file` loads the file into memory in a single read. `split_words` then
-splits it in place: it overwrites each whitespace byte with a NUL byte and
-returns the word starts; each `Word` is a pointer to a NUL-terminated byte
-string into the input buffer (it no longer owns its bytes). The input buffer
-must outlive the words that point into it (the pipeline owns both; `Results`
-copies each distinct word's bytes, so the results stay valid once the buffer is
-gone). The input is assumed to be ASCII text, so no word contains a NUL byte.
-Do not call `split_words` twice on the same buffer.
+`bin/bpe_seq` is the same sources built as a plain single-process program: **no
+MPI at all**, not `mpirun -np 1` and not the MPI binary with one rank. It links
+no `libmpi` and needs no launcher, and it implements the specification's rule, so
+its `output.txt` is the reference your parallel version must match byte for byte. Because it builds from the same sources, your
+code has to compile without MPI too: guard MPI calls with `#ifdef BPE_HAVE_MPI`,
+as `src/mpi_entry.cpp` does.
 
-## Logging (Abseil)
+### Output and self-check
 
-The CLI uses the Abseil logging library (`absl::log`). It writes progress
-(`LOG(INFO)`) and diagnostics (`LOG(ERROR)`) to **stderr**; stdout carries only
-the Task 1 output, so the byte-exact output contract is unaffected. The
-`abseil/` directory is a vendored subset of Abseil, trimmed to exactly the
-files the skeleton's logging needs. See more details of Abseil logging at https://abseil.io/docs/cpp/guides/logging.
+`bin/bpe input.txt` prints walltimes and writes `output.txt` in the current
+directory: one `token count` line per token, by decreasing count, ties by the
+lexicographically smallest token first. For a fixed input the output is
+byte-exact. The ranked run, the one-rank MPI run and the sequential binary must
+all agree — rule R2.1 in miniature:
 
-## What you must implement (rule R7.2)
+```
+make seq INPUT=file.txt && cp output.txt seq.txt
+OMP_NUM_THREADS=1 mpirun -np 1 ./bin/bpe file.txt
+cmp seq.txt output.txt
+```
+
+## Benchmarking (Task 3)
+
+```
+sbatch benchmark.slurm corpora/8G.txt          # writes results.csv
+REPS=5 sbatch benchmark.slurm corpora/8G.txt   # five runs per configuration
+```
+
+The four masked blocks are yours: the SLURM resource requests, the toolchain
+load and build, the four configuration tuples, and the `srun` launch line. The
+rest — the allocation check, the node log, `results.csv`, and the speed-up
+arithmetic — is provided. Size the allocation for the widest step, not for 16
+threads. Each rank reads the `BPE_THREADS` tuple and sets its own thread count
+from its MPI rank index (rule R1.4); if you change that convention, update
+`benchmark.slurm` and this README, because the teaching team runs the command you
+document.
+
+`results.csv` has one row per run (`filename,file_md5,version,partition,nodes,
+ranks,omp_threads,walltime,ram,output_md5`). The script prints each
+configuration's median and the aggregate speed-up
+
+    S = 4 * T_baseline / (T1 + T2 + T3 + T4)
+
+against the baseline, and the speed-mark band it falls in. The baseline is **the
+sequential reference itself**: `T_baseline` is the wall time of `bin/bpe_seq`, the
+executable `make seq` builds, on the same corpus on the same machine, one node and
+one thread. The script builds it, times it, prints the number it used and checks
+that its `output.txt` matches the four configurations.
+
+The specification fixes no number for it on purpose. The corpus used for marking
+is a different 8 GiB file, and a node under load slows the sequential run and your
+distributed runs alike, so measuring both in one window is what keeps either from
+moving your marks. `BASELINE=...` skips the baseline run and uses a value you
+supply, which is only useful when re-using a measurement you already have.
+
+Develop on the 8 GiB corpus you are given, but do not tune to it: a fixed word
+count, a hard-coded shard size or a data-dependent threshold will meet a corpus
+it has never seen.
+
+## Style (advisory, not marked)
+
+```
+make format   # apply Google C++ formatting (clang-format 14.0.6)
+make check    # report whether files already match; never fails a build
+```
+
+## Reading, splitting and logging
+
+`split_words` splits in place: each whitespace byte becomes NUL and the word
+starts are returned. A `Word` points into the input buffer and does not own it,
+so the buffer must outlive it (`Results` copies the distinct words' bytes, so
+results outlive it too). Input is ASCII, so no word contains NUL. Do not call
+`split_words` twice on one buffer.
+
+Logging is Abseil (`absl::log`) to **stderr**; stdout carries only the Task 1
+output, so the byte-exact contract is unaffected.
+https://abseil.io/docs/cpp/guides/logging
+
+## What you must implement (rules R2.2 and R2.3)
 
 Until you implement the parallel versions, `parallel_task1` and `parallel_task2`
-call the sequential reference, so the program is correct but shows no speed-up. A purely sequential implementation scores 0 for correctness and 0 for
-speed on Tasks 1 and 2 (rule R7.2), even you introduce your own sequential implementation with speedup. The provided sequential reference is there only for you to understand the problem and to verify your parallel implementation.
+call the sequential reference, so the program is correct but shows no speed-up.
+A purely sequential implementation scores 0 for correctness and 0 for speed
+(rule R2.3), even if you introduce your own sequential implementation with a
+speed-up. A submission that never calls MPI scores 0 out of 20 for the whole
+project (rule R2.2). The provided sequential reference is there only for you to
+understand the problem and to verify your distributed implementation.
 
 You may extend the API in `src/bpe.h` or add new source files in `src/` (the
 Makefile compiles `src/*.cpp` automatically). Do not modify the sequential
-reference or the output format, because the evaluation compares your parallel result
-against them. You are allowed to add new logging statements for debugging, but do not remove the existing ones. During assessments, we will overwrite thoes sequential reference files with the provided skeleton versions, so any changes you make to them will be lost. ***Do not try to fake performance logs; doing so will result you in zero marks of this assignment.***
+reference or the output format, because the evaluation compares your parallel
+result against them. You may add logging for debugging, but do not remove the
+existing statements. During assessment we overwrite the sequential reference
+files with the provided skeleton versions, so changes to them are lost. ***Do
+not try to fake performance logs; doing so will result in zero marks for this
+assignment.***
 
 ## Notes
-- The parallel version `does not have to` be based on the sequential reference provided by this skeleton. It means you can implement your own parallel version from scratch, as long as it meets the requirements of the project specification. Or, if you choose to, you can also use the sequential reference as a starting point and then parallelize it, altough it might not be the most `fast` parallel implementation.
-- It is common that your initial parallel version is slower than our sequential reference (:D), but you should be able to improve it with profiling and tuning.
-- You are allowed to show your ideas, thoughts, designs, and results on [Ed](https://edstem.org/au/courses/38370/discussion) to get feedback or help others. However, ***you are never allowed to share any of your code anywhere; doing so will result you (and any other who submitted any part of your code) zero marks of this assignment.***.
 
+- The parallel version does not have to be based on the provided sequential
+  reference. You may implement your own from scratch, as long as it meets the
+  specification; the reference is also a starting point you can parallelise,
+  although it may not be the fastest one.
+- It is common for a first parallel version to be slower than the sequential
+  reference (:D). Profiling and tuning are part of the exercise.
+- You may discuss ideas, designs and results on
+  [Ed](https://edstem.org/au/courses/38370/discussion). ***You are never allowed
+  to share your code anywhere; doing so results in zero marks for you and for
+  anyone who submitted any part of it.***
 
 -------
 Add your readme content below.
 -------
 
 ## Authorship
-- Student Name: Ruoning Ren
-- Login ID: ruoningr
-- Student ID: 1690503
+- Student Name: John Doe
+- Login ID: johndoe
+- Student ID: 12345678
 
 ## Instructions
-
-### Testing correctness
-
-```bash
-make test                      # unit + differential tests (gtest)
-make smoke INPUT=test.txt      # byte-exact md5 check against a locked baseline
-                                # (locked baselines exist for test.txt, 10M.txt, 100M.txt)
-```
-
-`make smoke` also accepts a thread count via the environment, e.g.
-`OMP_NUM_THREADS=8 make smoke INPUT=10M.txt`, to confirm the parallel
-output matches the sequential reference at any thread count.
-
-### Testing performance
-
-Two ways:
-
-**1. Quick interactive check**, using a Spartan interactive session:
-
-```bash
-sinteractive -p sapphire --qos=punim0520 --time=00:40:00 --cpus-per-task=8
-# once inside the allocated node:
-cd 90025/skeleton
-make clean && make
-for t in 1 2 4 8; do
-  OMP_NUM_THREADS=$t ./bin/bpe /data/gpfs/projects/punim0520/2026/project1/100M.txt
-done
-```
-
-This is a shared (non-exclusive) allocation, so timings can be noisy if
-other jobs share the node; it is meant for quick sanity checks during
-development, not for the numbers reported in the written report.
-
-**2. Full formal benchmark**, matching Task 3's required output:
-
-```bash
-sbatch benchmark.slurm
-squeue --me                    # check status
-cat results.csv                # once the job completes
-```
-
-`benchmark.slurm` requests an `--exclusive` `sapphire` node and sweeps
-`OMP_NUM_THREADS` = 1, 2, 4, 8, 16, 32 across `10M.txt`, `100M.txt` and
-`1G.txt` by default (pass one or more file paths as arguments to
-`sbatch benchmark.slurm <file> ...` to override), writing `results.csv`
-with the columns `filename,file_md5,version,partition,threads,walltime,
-ram,output_md5`. This exclusive, full sweep is what the written
-report's measured results are based on.
+To be filled by you.
 
 ## Acknowledgements
-### Human assistance
-
-No code, designs, or solutions were shared with or received from any
-other student, tutor, lecturer, or friend. The only outside input was
-reading a clarification thread on Ed Discussion, which established that
-Task 1's word-count output order is unspecified by the spec.
-
-### AI assistance
-
-Claude Code was used in this project. All AI answers were reviewed by myself before accepted. The tables below group the substantive prompts and what Claude Code did in response by purpose; routine status checks (e.g. confirming a SLURM job's queue position) are omitted for brevity. 
-
-#### Understanding the assignment background
-
-| My prompt (summarised and translated) | What Claude Code did |
-|---|---|
-| "查看C:\...\2026comp90025p1bpe文件" (read this specific, more detailed spec PDF). | Read the full document, including the mark allocation table, the H1/H2/H3/P speed-up grading curve (relative to the teaching team's own sequential baseline, not my own internal ratio), and rules R7.1–R8.4 (correctness/parallelism gates, version control, compile/run, submission format, AI-disclosure). |
-| "评分标准里是不是说了benchmark要输出指定格式的结果来着" / "8列是哪8列" (does the rubric specify a required results.csv format, and what are the 8 columns). | Quoted the exact Task 3 requirement (script name, `results.csv` filename, and the 8 required column names in order) and confirmed the submitted `benchmark.slurm` matches it exactly. |
-| "评分标准你看了吗，是不是对多次commit有要求" (does the rubric require frequent commits). | Quoted rule R7.3 (frequent commits, student-email author address) and the submission section explaining the whole `.git` history travels inside the submitted tarball, so markers verify it by running `git log` themselves — no separate report mention or remote repo link is needed. |
-
-#### Analyzing benchmark and run results
-
-| My prompt (summarised/translated) | What Claude Code did |
-|---|---|
-| "我已经在spartan上面做了初步测试，已经有了results.csv，但是我不知道怎么阅读" (I have an initial results.csv from Spartan but don't know how to read it). | Parsed the CSV, identified Task 2's parallel implementation was slower than sequential, and proposed a profiling-first optimization plan. |
-| Pasted raw `LOG(INFO)` profiling output and `slurm-*.out` files at several points during development. | Interpreted the phase-level timing breakdowns (select vs. apply, bucketing scan vs. merge) and staleness counters to locate the actual bottleneck each time, rather than guessing. |
-| "你进入windows的这个路径...里面有三个out文件和两个result.csv文件...result2是新的结果你还没看" (pointed to newly copied benchmark output files). | Read both independent exclusive-node `sbatch` runs, cross-checked `output_md5` against the locked reference hashes for every file/thread combination, and averaged the two runs' wall times into the numbers used in the report. |
-| Reported a `sbatch` job queued days past the deadline while waiting for a 4G.txt data point. | Recommended cancelling the job and dropping the (non-mandatory) 4G.txt figure rather than risk missing the deadline. |
-
-#### Git version control
-
-| My prompt (summarised/translated) | What Claude Code did |
-|---|---|
-| "先记录一下成果，然后再回退版本，但是不撤销commit，只是把代码回退回去" (record findings, then roll back the code without deleting the commits). | Used `git revert` to undo a compaction experiment's code once measurement showed it was net-neutral, while preserving both original commits in history. |
-| "你修改一下benchmark的参数，然后...push一下" (make a change to benchmark.slurm parameter and push it). | Committed and pushed directly to `origin/main`, with commit messages documenting the measured data behind each change (e.g. the `--time` budget reduction). |
+To be filled by you.

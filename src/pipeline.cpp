@@ -43,26 +43,43 @@ int run_cli(int argc, char** argv) {
         return 2;
     }
     try {
-        LOG(INFO) << "OpenMP threads: " << omp_get_max_threads();
+        LOG(INFO) << "OpenMP threads: " << omp_get_max_threads()
+                  << "; MPI rank " << mpi_rank() << " of " << mpi_size();
+        // Only rank 0 reads the corpus (specification, Data Specification).
+        // TODO(Project 2): send each rank its share of `input` over MPI. Rank 0
+        // holds the whole corpus and the other ranks start empty; a word must
+        // never be split across two ranks, so choose the boundaries of each
+        // share before sending.
         const std::chrono::steady_clock::time_point t_load0 =
             std::chrono::steady_clock::now();
-        std::vector<Byte> input = read_file(argv[1]);
+        std::vector<Byte> input;
+        if (mpi_rank() == 0) {
+            input = read_file(argv[1]);
+        }
         const std::chrono::steady_clock::time_point t_load1 =
             std::chrono::steady_clock::now();
         LOG(INFO) << "read " << input.size() << " bytes from " << argv[1];
         LOG(INFO) << "load file: " << elapsed_ms(t_load0, t_load1) << " ms";
+        // TODO(Project 2): the merge decision is global, so every rank must
+        // reach the same answer as a single process would. See parallel_task1
+        // and parallel_task2 in src/parallel.cpp.
         const Results results = run_pipeline(input);
         LOG(INFO) << "task 1: " << results.word_counts.size()
                   << " distinct words; task 2: " << results.tokens.size()
                   << " tokens";
         const std::chrono::steady_clock::time_point t_save0 =
             std::chrono::steady_clock::now();
-        write_output(results, "output.txt");
+        // Only rank 0 writes the output (specification, Data Specification).
+        if (mpi_rank() == 0) {
+            write_output(results, "output.txt");
+        }
         const std::chrono::steady_clock::time_point t_save1 =
             std::chrono::steady_clock::now();
         LOG(INFO) << "save output: " << elapsed_ms(t_save0, t_save1) << " ms";
-        LOG(INFO) << "wrote output.txt (md5 "
-                  << md5_hex(read_file("output.txt")) << ")";
+        if (mpi_rank() == 0) {
+            LOG(INFO) << "wrote output.txt (md5 "
+                      << md5_hex(read_file("output.txt")) << ")";
+        }
         return 0;
     } catch (const std::exception& e) {
         LOG(ERROR) << e.what();

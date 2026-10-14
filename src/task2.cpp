@@ -164,7 +164,15 @@ bool queue_compare::operator()(const queue_entry& left,
                                   state->vocabulary[pair_right(a.key)];
     const std::string right_text = state->vocabulary[pair_left(b.key)] +
                                    state->vocabulary[pair_right(b.key)];
-    return std::strcmp(left_text.c_str(), right_text.c_str()) > 0;
+    const int cmp = std::strcmp(left_text.c_str(), right_text.c_str());
+    if (cmp != 0) {
+        return cmp > 0;
+    }
+    // Two different pairs can share a count and a merged text ("ab"+"c" and
+    // "a"+"bc" both merge to "abc"). Ordering them on the key makes the order
+    // total, so the round's list is a function of the counts and not of the
+    // heap's layout -- which is what lets every rank select the same 256.
+    return a.key > b.key;
 }
 
 bool is_live(const task2_state& state, u32 position) {
@@ -412,25 +420,20 @@ void build_state(const std::vector<CharSplit>& splits, task2_state& state) {
     state.right_state.assign(cache_size, no_position);
 }
 
-void run_merge_loop(task2_state& state) {
-    queue_heap queue;
-    queue.comp.state = &state;
-    for (u32 state_id = 0; state_id < state.pair_states.size(); ++state_id) {
-        const pair_state& pair = state.pair_states[state_id];
-        if (pair.word_count >= 2) {
-            queue.push(queue_entry{pair.count, pair.fingerprint, state_id});
-        }
-    }
-
-    for (;;) {
-        const u32 best_state = pop_best_state(state, queue);
-        if (best_state == no_position) {
-            break;
-        }
-
-        const u64 best_key = state.pair_states[best_state].key;
+// Merge one selected pair: create its token, then merge every occurrence of it
+// that is still there.
+//
+// The token is created even when the pair no longer occurs. A pair selected
+// into a round can have been merged already by an earlier pair of the same
+// round -- its occurrences are gone but the round's list is a snapshot and does
+// not change -- and the token is still appended, because the token ids are what
+// the tie-breaks are made of: skip it here and every later round would order
+// pairs differently from the reference.
+void merge_selected_pair(task2_state& state, u32 selected) {
+    {
+        const u64 best_key = state.pair_states[selected].key;
         std::vector<u32> positions =
-            std::move(state.pair_states[best_state].positions);
+            std::move(state.pair_states[selected].positions);
         const u32 left_token = pair_left(best_key);
         const u32 right_token = pair_right(best_key);
         const u32 merged_token = static_cast<u32>(state.vocabulary.size());
@@ -497,6 +500,59 @@ void run_merge_loop(task2_state& state) {
                     state, merged_token, state.token[after_position]);
                 add_edge(state, position, state_id, word, frequency);
             }
+        }
+    }
+}
+
+// One round selects the kMergeBudget most frequent eligible pairs, merges all of
+// them, and only then selects again. This is the one rule that differs from
+// Project 1, whose loop merged the single best pair and re-selected; a list
+// fixed for 256 merges is what a cluster can work on, because the 256 are
+// disjoint and every rank can merge its own occurrences of them at once.
+constexpr std::size_t kMergeBudget = 256;
+
+void run_merge_loop(task2_state& state) {
+    queue_heap queue;
+    queue.comp.state = &state;
+    for (u32 state_id = 0; state_id < state.pair_states.size(); ++state_id) {
+        const pair_state& pair = state.pair_states[state_id];
+        if (pair.word_count >= 2) {
+            queue.push(queue_entry{pair.count, pair.fingerprint, state_id});
+        }
+    }
+
+    // A pair can be pushed into the queue more than once, so a round that has
+    // already selected one must not select it again: it would get a second
+    // token. The stamp is per round, because a pair whose occurrences were all
+    // merged away can become adjacent again later and legitimately return.
+    std::vector<u32> selected_stamp(state.pair_states.size(), 0);
+    u32 round_stamp = 0;
+    std::vector<u32> batch;
+
+    for (;;) {
+        ++round_stamp;
+        batch.clear();
+        while (batch.size() < kMergeBudget) {
+            const u32 best_state = pop_best_state(state, queue);
+            if (best_state == no_position) {
+                break;
+            }
+            // pair_states grows while the round merges -- a merge creates the
+            // pairs around its new token -- so the stamp array is grown with it.
+            if (best_state >= selected_stamp.size()) {
+                selected_stamp.resize(state.pair_states.size(), 0);
+            }
+            if (selected_stamp[best_state] == round_stamp) {
+                continue;
+            }
+            selected_stamp[best_state] = round_stamp;
+            batch.push_back(best_state);
+        }
+        if (batch.empty()) {
+            break;
+        }
+        for (u32 selected : batch) {
+            merge_selected_pair(state, selected);
         }
         push_born_states(state, queue);
     }

@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -42,18 +43,15 @@ TEST(RunPipeline, ProducesTask1AndTask2Results) {
     std::vector<bpe::Byte> buffer(input.begin(), input.end());
     const bpe::Results r = bpe::run_pipeline(buffer);
 
-    // Task 1.1 (word_counts is in lexicographic order): hug x2, pug x1.
+    // Task 1.1: hug x2, pug x1. The specification does not prescribe the order
+    // of word_counts, so compare by lookup rather than by position.
     ASSERT_EQ(r.word_counts.size(), 2u);
-    auto find_count = [&](const std::string& word) -> std::size_t {
-        for (const auto& wc : r.word_counts) {
-            if (std::string(wc.word.begin(), wc.word.end()) == word) {
-                return wc.count;
-            }
-        }
-        return 0;
-    };
-    EXPECT_EQ(find_count("hug"), 2u);
-    EXPECT_EQ(find_count("pug"), 1u);
+    std::map<std::string, std::size_t> counts;
+    for (const bpe::WordCount& wc : r.word_counts) {
+        counts[std::string(wc.word.begin(), wc.word.end())] = wc.count;
+    }
+    EXPECT_EQ(counts["hug"], 2u);
+    EXPECT_EQ(counts["pug"], 1u);
 
     // Task 1.2 feeds Task 2; tokens must be non-empty and internally
     // consistent (each token's bytes occur in the corpus).

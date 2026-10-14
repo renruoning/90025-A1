@@ -27,6 +27,7 @@
 
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -57,11 +58,14 @@ Corpus make_corpus(const std::vector<std::string>& word_list) {
 
 using StrCount = std::pair<std::string, std::size_t>;
 
+// The specification does not prescribe the order of the Task 1 results, so the
+// helper sorts before comparing.
 std::vector<StrCount> word_counts(const bpe::Results& r) {
     std::vector<StrCount> out;
     for (const bpe::WordCount& wc : r.word_counts) {
         out.emplace_back(std::string(wc.word.begin(), wc.word.end()), wc.count);
     }
+    std::sort(out.begin(), out.end());
     return out;
 }
 

@@ -4,6 +4,7 @@
 
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <initializer_list>
 #include <string>
@@ -37,11 +38,15 @@ Corpus make_corpus(std::initializer_list<std::string> word_list) {
 
 using StrCount = std::pair<std::string, std::size_t>;
 
+// The specification does not prescribe the order of the Task 1 results, so the
+// helpers sort before comparing: a correct implementation may emit the distinct
+// words in any order.
 std::vector<StrCount> word_counts(const bpe::Results& r) {
     std::vector<StrCount> out;
     for (const bpe::WordCount& wc : r.word_counts) {
         out.emplace_back(std::string(wc.word.begin(), wc.word.end()), wc.count);
     }
+    std::sort(out.begin(), out.end());
     return out;
 }
 
@@ -51,6 +56,7 @@ std::vector<StrCount> char_splits(const bpe::Results& r) {
         out.emplace_back(std::string(cs.chars.begin(), cs.chars.end()),
                          cs.count);
     }
+    std::sort(out.begin(), out.end());
     return out;
 }
 

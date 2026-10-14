@@ -1,4 +1,17 @@
+MPICXX := $(shell command -v mpicxx 2>/dev/null || command -v mpic++ 2>/dev/null)
+ifeq ($(MPICXX),)
 CXX ?= g++
+MPI_DEFINE :=
+MPI_INCLUDES :=
+$(info make: note: mpicxx not found, so this builds without MPI support.)
+$(info make: note: on Spartan, run "module load GCC OpenMPI" first.)
+else
+CXX := $(MPICXX)
+MPI_DEFINE := -DBPE_HAVE_MPI
+# Treat the MPI headers as system headers: warnings raised inside them (some
+# OpenMPI C++ bindings trip -Wcast-function-type) are then not reported.
+MPI_INCLUDES := $(patsubst -I%,-isystem%,$(shell $(MPICXX) --showme:compile 2>/dev/null))
+endif
 INCLUDES := -Isrc -Igtest/googletest/include -Igtest/googletest -Iabseil
 
 UNAME_S := $(shell uname -s 2>/dev/null)
@@ -60,10 +73,10 @@ MD5_CMD := md5sum
 endif
 
 OBJDIR := build
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2 $(OPENMP_FLAGS) $(THREAD_FLAG)
+CXXFLAGS := -std=c++17 -Wall -Wextra -O2 $(MPI_DEFINE) $(MPI_INCLUDES) $(OPENMP_FLAGS) $(THREAD_FLAG)
 ifeq ($(COVERAGE),1)
 OBJDIR := build-cov
-CXXFLAGS := -std=c++17 -Wall -Wextra -O0 $(OPENMP_FLAGS) $(THREAD_FLAG) --coverage
+CXXFLAGS := -std=c++17 -Wall -Wextra -O0 $(MPI_DEFINE) $(MPI_INCLUDES) $(OPENMP_FLAGS) $(THREAD_FLAG) --coverage
 endif
 
 BIN := bin
@@ -78,7 +91,17 @@ GTEST_OBJS := $(OBJDIR)/gtest-all.o
 ABSEIL_SRCS := $(shell find abseil -name '*.cc')
 ABSEIL_OBJS := $(patsubst abseil/%.cc,$(OBJDIR)/abseil/%.o,$(ABSEIL_SRCS))
 
-.PHONY: all test coverage smoke run bench clean format check
+# The sequential reference: the same sources, built with no MPI at all (not
+# "mpirun -np 1"), so it links no libmpi and needs no launcher. Built from the
+# same sources as bin/bpe, so MPI calls must be guarded with #ifdef
+# BPE_HAVE_MPI, as src/mpi_entry.cpp does.
+SEQ_OBJDIR := build-seq
+SEQ_SRCS := $(LIB_SRCS) src/main.cpp
+SEQ_OBJS := $(patsubst src/%.cpp,$(SEQ_OBJDIR)/%.o,$(SEQ_SRCS))
+SEQ_CXX ?= $(shell command -v g++ 2>/dev/null || command -v c++ 2>/dev/null || echo $(CXX))
+SEQ_FLAGS := -std=c++17 -Wall -Wextra -O2 $(OPENMP_FLAGS) $(THREAD_FLAG)
+
+.PHONY: all test coverage smoke run mpi seq bench clean format check
 
 all: $(BIN)/bpe$(EXE)
 
@@ -104,6 +127,16 @@ $(BIN)/bpe$(EXE): $(MAIN_OBJ) $(LIB_OBJS) $(ABSEIL_OBJS) | $(BIN)
 $(BIN)/bpe_test$(EXE): $(TEST_OBJS) $(LIB_OBJS) $(GTEST_OBJS) $(ABSEIL_OBJS) | $(BIN)
 	$(CXX) $(CXXFLAGS) $(OPENMP_LIBS) $^ -o $@
 
+$(SEQ_OBJDIR):
+	mkdir -p $@
+
+$(SEQ_OBJDIR)/%.o: src/%.cpp | $(SEQ_OBJDIR)
+	$(SEQ_CXX) $(SEQ_FLAGS) $(INCLUDES) -c $< -o $@
+
+# The abseil objects are shared: they are built without MPI flags either way.
+$(BIN)/bpe_seq$(EXE): $(SEQ_OBJS) $(ABSEIL_OBJS) | $(BIN)
+	$(SEQ_CXX) $(SEQ_FLAGS) $(OPENMP_LIBS) $^ -o $@
+
 test: $(BIN)/bpe_test$(EXE)
 	./$(BIN)/bpe_test$(EXE)
 
@@ -119,24 +152,29 @@ coverage: clean
 	  [ -f "$$name.cpp.gcov" ] || { echo "WARNING: gcov failed for $$name" >&2; continue; }; \
 	  awk -v f="src/$$name.cpp" -F: '{c=$$1;gsub(/ /,"",c); if (c ~ /^[0-9]/) {t++; if (c+0>0) e++} else if (c=="#####") {t++}} END{printf "%s %d %d\n", f, e, t}' "$$name.cpp.gcov" >> /tmp/bpe_cov.txt; \
 	done; \
-	(gcov -o build-cov build-cov/task2_build.gcno >/dev/null 2>&1; cat task2_impl.h.gcov; \
-	 gcov -o build-cov build-cov/task2_finalize.gcno >/dev/null 2>&1; cat task2_impl.h.gcov; \
-	 gcov -o build-cov build-cov/task2_merge.gcno >/dev/null 2>&1; cat task2_impl.h.gcov) | \
-	  awk -F: '{c=$$1;gsub(/ /,"",c); if (c=="#####") total[$$2]=1; else if (c ~ /^[0-9]/) {total[$$2]=1; if (c+0>0) covered[$$2]=1}} END{ht=0; he=0; for (ln in total) {ht++; if (covered[ln]) he++}; printf "src/task2_impl.h %d %d\n", he, ht}' >> /tmp/bpe_cov.txt; \
 	awk '{tot+=$$3; exec+=$$2; printf "  %-22s %6.2f%%  (%d/%d)\n", $$1, 100*$$2/$$3, $$2, $$3} END{if (tot==0) {printf "  coverage: FAIL - no instrumented lines found\n"; exit 1} printf "  ----------------------------------------\n"; printf "  TOTAL statements: %d/%d\n", exec, tot; if (exec==tot) {printf "  coverage: 100%% PASS\n"; exit 0} else {printf "  coverage: FAIL - %d uncovered\n", tot-exec; exit 1}}' /tmp/bpe_cov.txt
 	@rm -f *.gcov /tmp/bpe_cov.txt
 
 smoke: all
 	@./$(BIN)/bpe$(EXE) $(INPUT) 2>/dev/null && \
 	  case "$$(basename $(INPUT))" in \
-	  test.txt) [ "$$($(MD5_CMD) output.txt | cut -d' ' -f1)" = "ad9bd56b5593db058f4918864ddad7ae" ] && echo "smoke OK: test.txt" || echo "smoke FAIL: test.txt md5 mismatch";; \
-	  10M.txt) [ "$$($(MD5_CMD) output.txt | cut -d' ' -f1)" = "437efd507a4ce4ca82956f062fa9c2b2" ] && echo "smoke OK: 10M.txt" || echo "smoke FAIL: 10M.txt md5 mismatch";; \
-	  100M.txt) [ "$$($(MD5_CMD) output.txt | cut -d' ' -f1)" = "3581e913ac4c3f85000e8f8c933c8037" ] && echo "smoke OK: 100M.txt" || echo "smoke FAIL: 100M.txt md5 mismatch";; \
+	  test.txt) [ "$$($(MD5_CMD) output.txt | cut -d' ' -f1)" = "a76373b824d758e96502b63096880502" ] && echo "smoke OK: test.txt" || echo "smoke FAIL: test.txt md5 mismatch";; \
+	  10M.txt) [ "$$($(MD5_CMD) output.txt | cut -d' ' -f1)" = "fd90fed5159d6d7600e29a39670367fe" ] && echo "smoke OK: 10M.txt" || echo "smoke FAIL: 10M.txt md5 mismatch";; \
+	  100M.txt) [ "$$($(MD5_CMD) output.txt | cut -d' ' -f1)" = "4a683d1f771f60ed708dc274cf2c8ab3" ] && echo "smoke OK: 100M.txt" || echo "smoke FAIL: 100M.txt md5 mismatch";; \
 	  *) echo "smoke: no locked baseline for $$(basename $(INPUT))";; \
 	  esac
 
 run: all
 	./$(BIN)/bpe$(EXE) $(INPUT)
+
+# Run under MPI (after: module load GCC OpenMPI). RANKS defaults to 2.
+RANKS ?= 2
+mpi: all
+	mpirun -np $(RANKS) ./$(BIN)/bpe$(EXE) $(INPUT)
+
+# The sequential reference, one thread, no MPI, no launcher.
+seq: $(BIN)/bpe_seq$(EXE)
+	OMP_NUM_THREADS=1 ./$(BIN)/bpe_seq$(EXE) $(INPUT)
 
 bench: all
 	@for t in 1 2 4 8 16 32; do \
@@ -145,7 +183,7 @@ bench: all
 	done
 
 clean:
-	rm -rf $(BIN) build build-cov *.gcov *.gcda *.gcno
+	rm -rf $(BIN) build build-seq build-cov *.gcov *.gcda *.gcno
 
 CLANG_FORMAT := $(shell command -v clang-format-14 2>/dev/null || command -v clang-format 2>/dev/null || echo clang-format)
 FORMAT_FILES := $(wildcard src/*.cpp) $(wildcard src/*.h) $(wildcard tests/*.cpp)

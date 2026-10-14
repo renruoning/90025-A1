@@ -4,5 +4,8 @@
 int main(int argc, char** argv) {
     absl::InitializeLog();
     absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
-    return bpe::run_cli(argc, argv);
+    bpe::mpi_init(&argc, &argv);
+    const int status = bpe::run_cli(argc, argv);
+    bpe::mpi_finalize();
+    return status;
 }

@@ -32,6 +32,18 @@ struct Word {
     const Byte* bytes;
 };
 
+// MPI entry. The skeleton starts the MPI runtime and exposes the rank layout;
+// distributing the corpus and combining the per-rank results is your work.
+// Without MPI (built without BPE_HAVE_MPI) these degrade to a single rank, so
+// the same source builds and runs either way.
+void mpi_init(int* argc, char*** argv);
+
+void mpi_finalize();
+
+int mpi_rank();
+
+int mpi_size();
+
 void parallel_task1(std::vector<Byte>& input, Results& results);
 
 void parallel_task2(const std::vector<CharSplit>& splits, Results& results);
