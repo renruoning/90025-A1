@@ -18,3 +18,7 @@ bench-*.out
 # Input datasets are large and must never be committed (rule R8.1)
 data/
 *.dat
+
+# Assignment spec (local reference only, not part of the submission)
+a1.pdf
+a2.pdf
