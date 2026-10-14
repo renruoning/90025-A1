@@ -33,10 +33,8 @@ void parallel_task1(std::vector<Byte>& input, Results& results) {
 // provides.
 void parallel_task2(const std::vector<CharSplit>& splits, Results& results) {
 #ifdef BPE_HAVE_MPI
-    if (num_workers() == 1) {
-        single_worker_task2(splits, results);
-        return;
-    }
+    distributed_task2(splits, results);
+    return;
 #endif
     task2(splits, results);
 }

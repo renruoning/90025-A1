@@ -38,8 +38,13 @@ int worker_of(const Byte* s, std::size_t n);
 void distributed_task1(std::vector<Byte>& input, Results& results);
 
 
-// Step 4: BPE merge loop with 256-pair rounds, for exactly one worker.
-void single_worker_task2(const std::vector<CharSplit>& splits, Results& results);
+// Where each of this rank's workers starts in results.char_splits after
+// distributed_task1 (threads+1 offsets).
+const std::vector<std::size_t>& task1_bounds();
+
+// Steps 4-5: the BPE rounds over all workers. Needs distributed_task1 to have
+// run first. Only rank 0 gets results.tokens.
+void distributed_task2(const std::vector<CharSplit>& splits, Results& results);
 
 }
 

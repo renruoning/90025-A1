@@ -46,6 +46,11 @@ std::int64_t ms_since(const std::chrono::steady_clock::time_point& t) {
                std::chrono::steady_clock::now() - t).count();
 }
 }
+namespace {
+std::vector<std::size_t> g_bounds;
+}
+const std::vector<std::size_t>& task1_bounds() { return g_bounds; }
+
 int worker_of(const Byte* s, std::size_t n) {
     return static_cast<int>(hash_bytes(s, n) % num_workers());
 }
@@ -149,11 +154,13 @@ void distributed_task1(std::vector<Byte>& input, Results& results) {
 
     results.word_counts.clear();
     results.char_splits.clear();
+    g_bounds.assign(1, 0);
     for (int t = 0; t < T; ++t){
         for (WordCount& wc : mine[t]) {
             results.char_splits.push_back(CharSplit{wc.word, wc.count});
             results.word_counts.push_back(std::move(wc));
         }
+        g_bounds.push_back(results.word_counts.size());
     }
     std::size_t freq=0;
     for (const WordCount& wc : results.word_counts) freq += wc.count;

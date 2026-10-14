@@ -8,8 +8,13 @@
 #include <limits>
 #include <queue>
 #include <string>
+#include <omp.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#ifdef BPE_HAVE_MPI
+#include <mpi.h>
+#endif
 namespace bpe {
 namespace {
 
@@ -90,9 +95,10 @@ struct Pair {
 // of every pair and reports how that view changed (Delta) after each round.
 class Worker {
   public:
-    void build(const std::vector<CharSplit>& splits) {
+    void build(const CharSplit* begin, const CharSplit* end) {
+        const std::size_t nwords = end - begin;
         std::size_t slots = 0;
-        for (const CharSplit& s : splits) slots += s.chars.size() + 1;
+        for (const CharSplit* s = begin; s != end; ++s) slots += s->chars.size() + 1;
         token_.reserve(slots);
         prev_.reserve(slots);
         next_.reserve(slots);
@@ -102,8 +108,8 @@ class Worker {
         token_count_.assign(256, 0);
         ensure_cache(256);
         std::vector<u32> first(256 * 256, kNone);
-        for (u32 w = 0; w < splits.size(); ++w) {
-            const CharSplit& s = splits[w];
+        for (u32 w = 0; w < nwords; ++w) {
+            const CharSplit& s = begin[w];
             freq_.push_back(s.count);
             const u32 start = u32(token_.size());
             for (std::size_t i = 0; i < s.chars.size(); ++i) {
@@ -303,13 +309,11 @@ class Owner {
   public:
     explicit Owner(const Vocab* v) : vocab_(v), heap_(LowerPrio{v}) {}
 
-    void apply(const std::vector<Delta>& ds) {
-        for (const Delta& d : ds) {
-            auto r = table_.try_emplace(d.key);
-            if (r.second) born_.push_back(d.key);
-            r.first->second.count += u64(d.dcount);  // wraps for negatives, still right
-            r.first->second.words += d.dwords;
-        }
+    void add(const Delta& d) {
+        auto r = table_.try_emplace(d.key);
+        if (r.second) born_.push_back(d.key);
+        r.first->second.count += u64(d.dcount);  // wraps for negatives, still right
+        r.first->second.words += d.dwords;
     }
     // new pairs join the queue once the whole round has been applied
     void end_round() {
@@ -349,52 +353,215 @@ class Owner {
     std::priority_queue<Cand, std::vector<Cand>, LowerPrio> heap_;
 };
 
+
+u64 mix(u64 x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
 }
-// step 4: one worker does everything, nothing is sent anywhere
-void single_worker_task2(const std::vector<CharSplit>& splits, Results& results) {
-    const auto t0 = std::chrono::steady_clock::now();
-    Vocab vocab;
-    Worker worker;
-    Owner owner(&vocab);
-    worker.build(splits);
-    std::vector<Delta> deltas;
-    worker.take_deltas(deltas);
-    owner.apply(deltas);
-    owner.end_round();
-    int rounds = 0;
-    for (;;) {
-        std::vector<Cand> batch;
-        owner.pop_cands(kBatch,batch);
-        if (batch.empty()) break;
-        for (const Cand& c : batch) {
-            const u32 id = u32(vocab.text.size());
-            vocab.text.push_back(vocab.merged(c.key));
-            worker.merge(c.key, id);
+int owner_of(u64 key) { return int(mix(key) % u64(num_workers())); }
+
+struct WireCand {
+    u64 count;
+    u64 key;
+};
+
+#ifdef BPE_HAVE_MPI
+// every rank ends up with the concatenation of everyone's items
+template <class T>
+std::vector<T> allgather(const std::vector<T>& mine) {
+    const int ranks = mpi_size();
+    int n = int(mine.size() * sizeof(T));
+    std::vector<int> cnt(ranks), disp(ranks);
+    MPI_Allgather(&n, 1, MPI_INT, cnt.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    int total = 0;
+    for (int r = 0; r < ranks; ++r) {
+        disp[r] = total;
+        total += cnt[r];
+    }
+    std::vector<T> all(total / sizeof(T));
+    MPI_Allgatherv(mine.data(), n, MPI_BYTE, all.data(), cnt.data(), disp.data(),
+                   MPI_BYTE, MPI_COMM_WORLD);
+    return all;
+}
+#endif
+
+// Send every delta to the rank of the worker that owns its pair; each owner
+// thread then picks out its own and applies them.
+void route_deltas(std::vector<std::vector<Delta>>& out, std::vector<Owner>& owners) {
+    const int ranks = mpi_size();
+    const int T = int(owners.size());
+    const int w0 = first_worker(mpi_rank());
+    std::vector<std::vector<Delta>> by_rank(ranks);
+    std::vector<int> scount(ranks, 0), sdisp(ranks, 0);
+    std::vector<Delta> sbuf;
+    {
+        std::size_t total = 0;
+        for (const auto& v : out) total += v.size();
+        sbuf.reserve(total);
+    }
+    // grouped by destination rank
+    std::vector<std::vector<Delta>> part(ranks);
+    for (auto& v : out) {
+        for (const Delta& d : v) part[worker_rank(owner_of(d.key))].push_back(d);
+        std::vector<Delta>().swap(v);
+    }
+    for (int r = 0; r < ranks; ++r) {
+        sdisp[r] = int(sbuf.size() * sizeof(Delta));
+        sbuf.insert(sbuf.end(), part[r].begin(), part[r].end());
+        scount[r] = int(part[r].size() * sizeof(Delta));
+    }
+    std::vector<Delta> rbuf;
+    if (ranks == 1) {
+        rbuf.swap(sbuf);
+    }
+#ifdef BPE_HAVE_MPI
+    else {
+        std::vector<int> rcount(ranks), rdisp(ranks);
+        MPI_Alltoall(scount.data(), 1, MPI_INT, rcount.data(), 1, MPI_INT,
+                     MPI_COMM_WORLD);
+        int total = 0;
+        for (int r = 0; r < ranks; ++r) {
+            rdisp[r] = total;
+            total += rcount[r];
         }
-        deltas.clear();
-        worker.take_deltas(deltas);
-        owner.apply(deltas);
-        owner.end_round();
+        rbuf.resize(total / sizeof(Delta));
+        MPI_Alltoallv(sbuf.data(), scount.data(), sdisp.data(), MPI_BYTE,
+                      rbuf.data(), rcount.data(), rdisp.data(), MPI_BYTE,
+                      MPI_COMM_WORLD);
+    }
+#endif
+#pragma omp parallel num_threads(T)
+    {
+        const int t = omp_get_thread_num();
+        for (const Delta& d : rbuf)
+            if (owner_of(d.key) == w0 + t) owners[t].add(d);
+        owners[t].end_round();
+    }
+}
+
+}
+void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto ms = [](std::chrono::steady_clock::time_point a) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - a).count();
+    };
+    const int me = mpi_rank();
+    const int T = threads_of(me);
+    const std::vector<std::size_t>& bounds = task1_bounds();
+
+    Vocab vocab;
+    std::vector<Worker> workers(T);
+    std::vector<Owner> owners(T, Owner(&vocab));
+    std::vector<std::vector<Delta>> deltas(T);
+
+    // build local words, then tell the owners what the pairs look like
+#pragma omp parallel num_threads(T)
+    {
+        const int t = omp_get_thread_num();
+        workers[t].build(splits.data() + bounds[t], splits.data() + bounds[t + 1]);
+        workers[t].take_deltas(deltas[t]);
+    }
+    route_deltas(deltas, owners);
+    const auto t_build = ms(t0);
+
+    std::int64_t t_sel = 0, t_merge = 0, t_route = 0;
+    int rounds = 0;
+    std::vector<std::vector<Cand>> popped(T);
+    for (;;) {
+        // each owner offers its best 256, the best 256 of all of them win
+        auto ts = std::chrono::steady_clock::now();
+        std::vector<WireCand> mine;
+#pragma omp parallel num_threads(T)
+        {
+            const int t = omp_get_thread_num();
+            popped[t].clear();
+            owners[t].pop_cands(kBatch, popped[t]);
+        }
+        for (int t = 0; t < T; ++t)
+            for (const Cand& c : popped[t]) mine.push_back(WireCand{c.count, c.key});
+        std::vector<WireCand> all;
+        if (mpi_size() == 1) {
+            all.swap(mine);
+        }
+#ifdef BPE_HAVE_MPI
+        else {
+            all = allgather(mine);
+        }
+#endif
+        std::vector<Cand> cands;
+        cands.reserve(all.size());
+        for (const WireCand& w : all)
+            cands.push_back(Cand{w.count, fingerprint(vocab, w.key), w.key});
+        const LowerPrio lower{&vocab};
+        std::sort(cands.begin(), cands.end(),
+                  [&](const Cand& a, const Cand& b) { return lower(b, a); });
+        if (cands.size() > kBatch) cands.resize(kBatch);
+        t_sel += ms(ts);
+        if (cands.empty()) break;
+
+        // the ones that lost go back into their owner's queue
+        std::unordered_set<u64> won;
+        for (const Cand& c : cands) won.insert(c.key);
+#pragma omp parallel num_threads(T)
+        {
+            const int t = omp_get_thread_num();
+            for (const Cand& c : popped[t])
+                if (!won.count(c.key)) owners[t].give_back(c);
+        }
+
+        // new tokens in batch order, same ids on every rank
+        auto tm = std::chrono::steady_clock::now();
+        const u32 first_id = u32(vocab.text.size());
+        for (const Cand& c : cands) vocab.text.push_back(vocab.merged(c.key));
+#pragma omp parallel num_threads(T)
+        {
+            const int t = omp_get_thread_num();
+            for (std::size_t i = 0; i < cands.size(); ++i)
+                workers[t].merge(cands[i].key, first_id + u32(i));
+            workers[t].take_deltas(deltas[t]);
+        }
+        t_merge += ms(tm);
+        auto tr = std::chrono::steady_clock::now();
+        route_deltas(deltas, owners);
+        t_route += ms(tr);
         ++rounds;
     }
 
-    const std::vector<u64>& cnt = worker.token_count();
-    std::vector<u32> live;
-    for (u32 t = 1; t<cnt.size(); ++t)
-        if (cnt[t] != 0) live.push_back(t);
-    std::sort(live.begin(), live.end(), [&](u32 a, u32 b) {
-        if (cnt[a] != cnt[b]) return cnt[a]>cnt[b];
-        return std::strcmp(vocab.text[a].c_str(), vocab.text[b].c_str()) < 0;
-    });
-    results.tokens.clear();
-    for (u32 t : live) {
-        const std::string& s = vocab.text[t];
-        results.tokens.push_back(
-            TokenCount{std::vector<Byte>(s.begin(), s.end()), std::size_t(cnt[t])});
+    // add up the token counts of all workers on all ranks
+    std::vector<u64> cnt(vocab.text.size(), 0);
+    for (int t = 0; t < T; ++t) {
+        const std::vector<u64>& c = workers[t].token_count();
+        for (std::size_t i = 0; i < c.size() && i < cnt.size(); ++i) cnt[i] += c[i];
     }
-    LOG(INFO) << "single worker task2: " << rounds << " rounds, "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(
-                     std::chrono::steady_clock::now() - t0).count() << " ms";
+#ifdef BPE_HAVE_MPI
+    if (mpi_size() > 1) {
+        std::vector<u64> sum(cnt.size(), 0);
+        MPI_Reduce(cnt.data(), sum.data(), int(cnt.size()), MPI_UNSIGNED_LONG_LONG,
+                   MPI_SUM, 0, MPI_COMM_WORLD);
+        cnt.swap(sum);
+    }
+#endif
+    results.tokens.clear();
+    if (me == 0) {
+        std::vector<u32> live;
+        for (u32 t = 1; t < cnt.size(); ++t)
+            if (cnt[t] != 0) live.push_back(t);
+        std::sort(live.begin(), live.end(), [&](u32 a, u32 b) {
+            if (cnt[a] != cnt[b]) return cnt[a] > cnt[b];
+            return std::strcmp(vocab.text[a].c_str(), vocab.text[b].c_str()) < 0;
+        });
+        for (u32 t : live) {
+            const std::string& s = vocab.text[t];
+            results.tokens.push_back(TokenCount{std::vector<Byte>(s.begin(), s.end()),
+                                                std::size_t(cnt[t])});
+        }
+        LOG(INFO) << "task2: " << rounds << " rounds; build " << t_build
+                  << " ms, select " << t_sel << " ms, merge " << t_merge
+                  << " ms, route " << t_route << " ms, total " << ms(t0) << " ms";
+    }
 }
 
 }
