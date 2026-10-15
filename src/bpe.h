@@ -44,6 +44,10 @@ int mpi_rank();
 
 int mpi_size();
 
+// Stop every rank. A rank that fails alone would otherwise leave the others
+// waiting for its messages forever.
+void mpi_abort(int code);
+
 void parallel_task1(std::vector<Byte>& input, Results& results);
 
 void parallel_task2(const std::vector<CharSplit>& splits, Results& results);

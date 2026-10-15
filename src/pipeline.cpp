@@ -85,6 +85,7 @@ int run_cli(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) {
         LOG(ERROR) << e.what();
+        mpi_abort(1);
         return 1;
     }
 }

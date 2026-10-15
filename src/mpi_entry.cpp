@@ -37,4 +37,11 @@ int mpi_rank() { return g_rank; }
 
 int mpi_size() { return g_size; }
 
+void mpi_abort(int code) {
+#ifdef BPE_HAVE_MPI
+    if (g_initialised && g_size > 1) MPI_Abort(MPI_COMM_WORLD, code);
+#endif
+    (void)code;
+}
+
 }
