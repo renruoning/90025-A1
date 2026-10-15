@@ -5,7 +5,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <omp.h>
+#include <fcntl.h>
+#include <stdexcept>
 #include <sstream>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <string>
 #ifdef BPE_HAVE_MPI
 #include <mpi.h>
@@ -98,6 +102,36 @@ std::vector<std::size_t> split_points(const Byte* buf, std::size_t n,const std::
         cuts[r] = b;
     }
     return cuts;
+}
+
+// like read_file, but several threads pread different pieces of the file
+std::vector<Byte> read_file_parallel(const std::string& path) {
+    const int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) throw std::runtime_error("cannot open file: " + path);
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); throw std::runtime_error("cannot stat file: " + path); }
+    const std::size_t n = static_cast<std::size_t>(st.st_size);
+    std::vector<Byte> data(n);
+    const std::size_t piece = std::size_t(8) << 20;
+    const long pieces = static_cast<long>((n + piece - 1) / piece);
+    bool failed = false;
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (long i = 0; i < pieces; ++i) {
+        std::size_t off = std::size_t(i) * piece;
+        const std::size_t end = std::min(n, off + piece);
+        while (off < end) {
+            const ssize_t got = pread(fd, data.data() + off, end - off, static_cast<off_t>(off));
+            if (got <= 0) {
+                #pragma omp atomic write
+                failed = true;
+                break;
+            }
+            off += static_cast<std::size_t>(got);
+        }
+    }
+    close(fd);
+    if (failed) throw std::runtime_error("short read on " + path);
+    return data;
 }
 
 void distribute_input(std::vector<Byte>& input) {

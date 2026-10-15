@@ -55,7 +55,7 @@ int run_cli(int argc, char** argv) {
             std::chrono::steady_clock::now();
         std::vector<Byte> input;
         if (mpi_rank() == 0) {
-            input = read_file(argv[1]);
+            input = read_file_parallel(argv[1]);
         }
         const std::chrono::steady_clock::time_point t_load1 =
             std::chrono::steady_clock::now();
