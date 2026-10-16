@@ -444,10 +444,11 @@ void route_deltas(std::vector<std::vector<Delta>>& out, std::vector<Owner>& owne
 }
 void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto ms = [](std::chrono::steady_clock::time_point a) {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
+    auto us = [](std::chrono::steady_clock::time_point a) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
                    std::chrono::steady_clock::now() - a).count();
     };
+    auto ms = [&](std::chrono::steady_clock::time_point a) { return us(a) / 1000; };
     const int me = mpi_rank();
     const int T = threads_of(me);
     const std::vector<std::size_t>& bounds = task1_bounds();
@@ -499,7 +500,7 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
         std::sort(cands.begin(), cands.end(),
                   [&](const Cand& a, const Cand& b) { return lower(b, a); });
         if (cands.size() > kBatch) cands.resize(kBatch);
-        t_sel += ms(ts);
+        t_sel += us(ts);
         if (cands.empty()) break;
 
         // the ones that lost go back into their owner's queue
@@ -513,7 +514,7 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
                 if (!won.count(c.key)) owners[t].give_back(c);
         }
 
-        t_back += ms(tb);
+        t_back += us(tb);
         // new tokens in batch order, same ids on every rank
         auto tm = std::chrono::steady_clock::now();
         const u32 first_id = u32(vocab.text.size());
@@ -525,10 +526,10 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
                 workers[t].merge(cands[i].key, first_id + u32(i));
             workers[t].take_deltas(deltas[t]);
         }
-        t_merge += ms(tm);
+        t_merge += us(tm);
         auto tr = std::chrono::steady_clock::now();
         route_deltas(deltas, owners);
-        t_route += ms(tr);
+        t_route += us(tr);
         ++rounds;
     }
 
@@ -562,8 +563,8 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
                                                 std::size_t(cnt[t])});
         }
         LOG(INFO) << "task2: " << rounds << " rounds; build " << t_build
-                  << " ms, select " << t_sel << " ms, give back " << t_back
-                  << " ms, merge " << t_merge << " ms, route " << t_route
+                  << " ms, select " << t_sel / 1000 << " ms, give back " << t_back / 1000
+                  << " ms, merge " << t_merge / 1000 << " ms, route " << t_route / 1000
                   << " ms, loop " << t_loop << " ms, total " << ms(t0) << " ms";
     }
     // free the big structures in parallel, one thread each, instead of one
