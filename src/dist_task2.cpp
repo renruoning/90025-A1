@@ -387,58 +387,101 @@ std::vector<T> allgather(const std::vector<T>& mine) {
 }
 #endif
 
-// Send every delta to the rank of the worker that owns its pair; each owner
-// thread then picks out its own and applies them.
+// Send every delta to the worker that owns its pair. Each thread sorts its own
+// deltas into one bucket per destination worker, the buckets are laid out by
+// worker (so a rank's share is one block), and a short header of counts lets
+// each receiving thread read just its own part.
 void route_deltas(std::vector<std::vector<Delta>>& out, std::vector<Owner>& owners) {
     const int ranks = mpi_size();
+    const int me = mpi_rank();
     const int T = int(owners.size());
-    const int w0 = first_worker(mpi_rank());
-    std::vector<std::vector<Delta>> by_rank(ranks);
-    std::vector<int> scount(ranks, 0), sdisp(ranks, 0);
-    std::vector<Delta> sbuf;
+    const int W = num_workers();
+    static std::vector<std::vector<std::vector<Delta>>> bk;  // [source thread][dest worker]
+    static std::vector<Delta> sbuf, rbuf;
+    const std::size_t big = std::size_t(1) << 20;
+    bk.resize(T);
+    for (auto& v : bk) v.resize(W);
+
+#pragma omp parallel num_threads(T)
     {
-        std::size_t total = 0;
-        for (const auto& v : out) total += v.size();
-        sbuf.reserve(total);
+        const int t = omp_get_thread_num();
+        for (auto& v : bk[t]) {
+            if (v.capacity() > big) std::vector<Delta>().swap(v);
+            v.clear();
+        }
+        for (const Delta& d: out[t]) bk[t][owner_of(d.key)].push_back(d);
+        if (out[t].capacity()> big) std::vector<Delta>().swap(out[t]);
+        out[t].clear();
     }
-    // grouped by destination rank
-    std::vector<std::vector<Delta>> part(ranks);
-    for (auto& v : out) {
-        for (const Delta& d : v) part[worker_rank(owner_of(d.key))].push_back(d);
-        std::vector<Delta>().swap(v);
+
+    // counts per destination worker, and where each bucket lands in sbuf
+    std::vector<int> hw(W, 0);
+    std::vector<std::size_t> base(W+1, 0);
+    for (int w = 0; w<W; ++w) {
+        for (int t =0;t < T;++t) hw[w] +=int(bk[t][w].size());
+        base[w+1]=base[w] + std::size_t(hw[w]);
     }
-    for (int r = 0; r < ranks; ++r) {
-        sdisp[r] = int(sbuf.size() * sizeof(Delta));
-        sbuf.insert(sbuf.end(), part[r].begin(), part[r].end());
-        scount[r] = int(part[r].size() * sizeof(Delta));
+    if (sbuf.capacity() >big&&base[W]<big/8) std::vector<Delta>().swap(sbuf);
+    sbuf.resize(base[W]);
+#pragma omp parallel num_threads(T)
+    {
+        const int t = omp_get_thread_num();
+        for (int w = 0; w<W; ++w) {
+            std::size_t pos=base[w];
+            for (int u =0; u < t;++u)pos += bk[u][w].size();
+            std::copy(bk[t][w].begin(),bk[t][w].end(), sbuf.begin() + pos);
+        }
     }
-    std::vector<Delta> rbuf;
+
+    std::vector<int> hdr;          // [source rank * T + my thread] -> delta count
+    std::vector<std::size_t> rdisp(ranks, 0);
     if (ranks == 1) {
+        hdr = hw;
         rbuf.swap(sbuf);
     }
 #ifdef BPE_HAVE_MPI
     else {
-        std::vector<int> rcount(ranks), rdisp(ranks);
-        MPI_Alltoall(scount.data(), 1, MPI_INT, rcount.data(), 1, MPI_INT,
-                     MPI_COMM_WORLD);
+        std::vector<int> hs(ranks), hsd(ranks), hr(ranks, T), hrd(ranks);
+        std::vector<int> scount(ranks), sdisp(ranks), rcount(ranks), rdsp(ranks);
+        for (int r = 0; r < ranks; ++r) {
+            hs[r] = threads_of(r);
+            hsd[r] = first_worker(r);
+            hrd[r] = r * T;
+            const int lo = first_worker(r), hi = lo + threads_of(r);
+            sdisp[r] = int(base[lo] * sizeof(Delta));
+            scount[r] = int((base[hi] - base[lo]) * sizeof(Delta));
+        }
+        hdr.assign(std::size_t(ranks) * T, 0);
+        MPI_Alltoallv(hw.data(), hs.data(), hsd.data(), MPI_INT,
+                      hdr.data(), hr.data(), hrd.data(), MPI_INT, MPI_COMM_WORLD);
         int total = 0;
         for (int r = 0; r < ranks; ++r) {
-            rdisp[r] = total;
+            long cnt = 0;
+            for (int t = 0; t < T; ++t) cnt += hdr[std::size_t(r) * T + t];
+            rcount[r] = int(cnt * long(sizeof(Delta)));
+            rdsp[r] = total;
+            rdisp[r] = std::size_t(total) / sizeof(Delta);
             total += rcount[r];
         }
-        rbuf.resize(total / sizeof(Delta));
+        if (rbuf.capacity() > big && std::size_t(total) < big) std::vector<Delta>().swap(rbuf);
+        rbuf.resize(std::size_t(total) / sizeof(Delta));
         MPI_Alltoallv(sbuf.data(), scount.data(), sdisp.data(), MPI_BYTE,
-                      rbuf.data(), rcount.data(), rdisp.data(), MPI_BYTE,
+                      rbuf.data(), rcount.data(), rdsp.data(), MPI_BYTE,
                       MPI_COMM_WORLD);
     }
 #endif
 #pragma omp parallel num_threads(T)
     {
         const int t = omp_get_thread_num();
-        for (const Delta& d : rbuf)
-            if (owner_of(d.key) == w0 + t) owners[t].add(d);
+        for (int r = 0; r < ranks; ++r) {
+            std::size_t pos = rdisp[r];
+            for (int u = 0; u < t; ++u) pos += std::size_t(hdr[std::size_t(r) * T + u]);
+            const std::size_t len = std::size_t(hdr[std::size_t(r) * T + t]);
+            for (std::size_t i = 0; i < len; ++i) owners[t].add(rbuf[pos + i]);
+        }
         owners[t].end_round();
     }
+    (void)me;
 }
 
 }
