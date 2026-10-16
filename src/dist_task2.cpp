@@ -467,7 +467,7 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
     route_deltas(deltas, owners);
     const auto t_build = ms(t0);
 
-    std::int64_t t_sel = 0, t_merge = 0, t_route = 0;
+    std::int64_t t_sel = 0, t_back = 0, t_merge = 0, t_route = 0;
     int rounds = 0;
     std::vector<std::vector<Cand>> popped(T);
     for (;;) {
@@ -503,6 +503,7 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
         if (cands.empty()) break;
 
         // the ones that lost go back into their owner's queue
+        auto tb = std::chrono::steady_clock::now();
         std::unordered_set<u64> won;
         for (const Cand& c : cands) won.insert(c.key);
 #pragma omp parallel num_threads(T)
@@ -512,6 +513,7 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
                 if (!won.count(c.key)) owners[t].give_back(c);
         }
 
+        t_back += ms(tb);
         // new tokens in batch order, same ids on every rank
         auto tm = std::chrono::steady_clock::now();
         const u32 first_id = u32(vocab.text.size());
@@ -530,6 +532,7 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
         ++rounds;
     }
 
+    const auto t_loop = ms(t0);
     // add up the token counts of all workers on all ranks
     std::vector<u64> cnt(vocab.text.size(), 0);
     for (int t = 0; t < T; ++t) {
@@ -559,9 +562,22 @@ void distributed_task2(const std::vector<CharSplit>& splits, Results& results) {
                                                 std::size_t(cnt[t])});
         }
         LOG(INFO) << "task2: " << rounds << " rounds; build " << t_build
-                  << " ms, select " << t_sel << " ms, merge " << t_merge
-                  << " ms, route " << t_route << " ms, total " << ms(t0) << " ms";
+                  << " ms, select " << t_sel << " ms, give back " << t_back
+                  << " ms, merge " << t_merge << " ms, route " << t_route
+                  << " ms, loop " << t_loop << " ms, total " << ms(t0) << " ms";
     }
+    // free the big structures in parallel, one thread each, instead of one
+    // thread walking millions of list nodes when the function returns
+    const auto tf = std::chrono::steady_clock::now();
+#pragma omp parallel num_threads(T)
+    {
+        const int t = omp_get_thread_num();
+        Worker gone_w;
+        std::swap(workers[t], gone_w);
+        Owner gone_o(&vocab);
+        std::swap(owners[t], gone_o);
+    }
+    if (me == 0) LOG(INFO) << "task2: teardown " << ms(tf) << " ms";
 }
 
 }

@@ -1,12 +1,12 @@
 #!/bin/bash
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+#SBATCH --job-name=bpe-bench
+#SBATCH --account=punim0520
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=30
+#SBATCH --mem=100G
+#SBATCH --time=03:00:00
+#SBATCH --output=bench-%j.out
 
 # Benchmarks the four graded configurations and writes results.csv.
 #
@@ -33,19 +33,19 @@
 
 set -euo pipefail
 
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓
+module load GCC OpenMPI
+# build here so the run always uses the current source
+make all >/dev/null
 
 INPUT="${1:-${INPUT:-data.txt}}"
 REPS="${REPS:-5}"   # five runs per configuration, as the specification requires
 
 # The four graded configurations: "<nodes> <ranks> <threads per rank>".
 CONFIGS=(
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+  "1 4 4,4,4,4"
+  "1 3 4,4,8"
+  "1 3 2,6,8"
+  "1 3 2,4,10"
 )
 
 # The allocation has to hold the widest step. Checked here rather than left to
@@ -114,7 +114,7 @@ for config in "${CONFIGS[@]}"; do
       unset OMP_NUM_THREADS
     fi
     start="$(date +%s)"
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+    srun --nodes="$nodes" --ntasks="$ranks" --cpus-per-task="$max_threads" \
          --time=00:20:00 ./bin/bpe "$INPUT" >/dev/null
     fallback="$(awk -v s="$start" -v e="$(date +%s)" 'BEGIN{
       d = e - s; printf "%02d:%02d:%02d", d/3600, (d%3600)/60, d%60}')"
