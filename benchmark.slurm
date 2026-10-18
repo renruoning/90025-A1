@@ -1,11 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=bpe-bench
 #SBATCH --account=punim0520
+#SBATCH --partition=sapphire
+#SBATCH --exclusive
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=30
 #SBATCH --mem=100G
-#SBATCH --time=03:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=bench-%j.out
 
 # Benchmarks the four graded configurations and writes results.csv.
