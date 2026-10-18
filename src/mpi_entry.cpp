@@ -13,7 +13,8 @@ bool g_initialised = false;
 void mpi_init(int* argc, char*** argv) {
 #ifdef BPE_HAVE_MPI
     if (!g_initialised) {
-        MPI_Init(argc, argv);
+        int provided = 0;
+        MPI_Init_thread(argc, argv, MPI_THREAD_FUNNELED, &provided);
         MPI_Comm_rank(MPI_COMM_WORLD, &g_rank);
         MPI_Comm_size(MPI_COMM_WORLD, &g_size);
         g_initialised = true;

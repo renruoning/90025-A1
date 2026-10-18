@@ -26,6 +26,9 @@ std::vector<std::size_t> split_points(const Byte* buf, std::size_t n,
 // Rank 0 sends every rank its share of `input` over MPI (shares are sized by
 // thread count) and keeps its own. The other ranks pass an empty vector and
 // get their share back. Does nothing on a single rank.
+// Rank 0 reads the file and streams every other rank its share while reading;
+// the other ranks just receive theirs. Returns this rank's share.
+std::vector<Byte> load_input(const std::string& path);
 std::vector<Byte> read_file_parallel(const std::string& path);
 void distribute_input(std::vector<Byte>& input);
 
