@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=bpe-bench
 #SBATCH --account=punim0520
-#SBATCH --partition=sapphire
-#SBATCH --exclusive
+#SBATCH --partition=cascade,sapphire
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=30
