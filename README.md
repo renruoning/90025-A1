@@ -198,12 +198,122 @@ Add your readme content below.
 -------
 
 ## Authorship
-- Student Name: John Doe
-- Login ID: johndoe
-- Student ID: 12345678
+- Student Name: Ruoning Ren
+- Login ID: ruoningr
+- Student ID: 1690503
 
 ## Instructions
-To be filled by you.
+
+### Build (Spartan)
+
+```
+module load GCC OpenMPI
+make all        # bin/bpe, the MPI + OpenMP build
+make seq        # bin/bpe_seq, the sequential reference (no MPI)
+```
+
+### Run the four graded configurations
+
+Each rank takes its OpenMP thread count from the `BPE_THREADS` environment
+variable: entry *i* is the thread count of rank *i*, so the number of entries is
+the number of ranks. All ranks run on one node. `--cpus-per-task` is the largest
+count in the tuple, because every rank gets the same CPU request. Set `C` to the
+input file.
+
+```
+# {4,4,4,4}   uniform, 4 ranks
+BPE_THREADS=4,4,4,4  srun --nodes=1 --ntasks=4 --cpus-per-task=4  ./bin/bpe $C
+# {4,4,8}     3 ranks
+BPE_THREADS=4,4,8    srun --nodes=1 --ntasks=3 --cpus-per-task=8  ./bin/bpe $C
+# {2,6,8}     3 ranks
+BPE_THREADS=2,6,8    srun --nodes=1 --ntasks=3 --cpus-per-task=8  ./bin/bpe $C
+# {2,4,10}    3 ranks
+BPE_THREADS=2,4,10   srun --nodes=1 --ntasks=3 --cpus-per-task=10 ./bin/bpe $C
+```
+
+A step needs `ranks x largest` CPUs, so {2,4,10} needs 30 CPUs even though it
+runs 16 threads. Without `BPE_THREADS` every rank uses the OpenMP default
+(`OMP_NUM_THREADS`). Any rank/thread layout works, nothing is tied to these four.
+`mpirun -np 3 ./bin/bpe file.txt` can be used instead of `srun` off the cluster
+(add `--oversubscribe` when there are fewer cores than threads).
+
+Only rank 0 opens the input and writes `output.txt` (in the current directory).
+Progress and timings go to stderr.
+
+### Self-check: 1 rank, 1 thread, against the sequential reference
+
+```
+make seq INPUT=file.txt && cp output.txt ref.txt   # bin/bpe_seq, no MPI
+BPE_THREADS=1 mpirun -np 1 ./bin/bpe file.txt
+cmp ref.txt output.txt
+```
+
+The same `cmp` against `ref.txt` works for every configuration above. On the
+development corpus `8G.txt` all four configurations give `output.txt` with md5
+`fee7c17ee2ca266621abb43200dcbb82`, the md5 of the sequential reference.
+
+### Benchmark
+
+```
+sbatch benchmark.slurm /data/gpfs/projects/punim0520/2026/project2/8G.txt
+```
+
+It builds both binaries, times `bin/bpe_seq`, runs each configuration five times
+and writes `results.csv`, the medians and the aggregate speed-up S. It asks for
+one node with 30 CPUs and 100 GB of memory; the largest rank needs about 11 GB
+on the 8 GiB corpus with {4,4,4,4} and more with {2,4,10}.
+
+### Design in one paragraph
+
+Every OpenMP thread of every rank is a *worker*, numbered rank by rank. Rank 0
+reads the file and streams each rank a share sized by its thread count, cut at
+whitespace so no word is split (`src/dist.cpp`); reading and sending overlap.
+Task 1: each thread counts the words of its slice in its own hash table, then
+every word goes to the worker that owns its hash, and the owner merges the
+counts (`src/dist_task1.cpp`). Task 2: each worker keeps its words as linked
+lists with the occurrences of every pair; the global count of a pair lives at
+the worker that owns the pair. Each round the owners offer their best pairs,
+every rank takes the same 256 winners by the specification's order, every worker
+merges its own occurrences of all 256, and the changes of count are sent to the
+owners with one all-to-all (`src/dist_task2.cpp`). Because load follows the
+number of threads, a rank with more threads gets a larger share of the words and
+pairs.
+
+### Layout
+
+```
+src/dist.cpp        thread layout (BPE_THREADS), input streaming and splitting
+src/dist_task1.cpp  distributed word counting + character split
+src/dist_task2.cpp  distributed 256-pair BPE rounds
+src/parallel.cpp    the two API entries, calling the above under MPI
+tests/              unit tests (make test)
+a1_code/            my Project 1 code, kept for reference, not built
+```
 
 ## Acknowledgements
-To be filled by you.
+
+### Human assistance
+
+No code, designs or solutions were shared with or received from any other
+student, tutor, lecturer or friend. The only outside input was reading the
+teaching team's replies in the Project 2 Ed Discussion megathread (path of the
+8G corpus, that `BPE_THREADS` may be handled by the program as long as each rank
+gets the right thread count, that the Makefile may be extended, and the
+reference timings of the teaching team's own solution).
+
+### AI assistance
+
+I used Claude Code in this project.
+Here are what it did, by purpose (the prompts are paraphrased from my messages, several were written in Chinese):
+
+| Purpose | What I asked (examples) | What Claude Code did |
+|---|---|---|
+| Plan | Read the specification and the skeleton, make a rough plan | give a basic develop plan  |
+| Testing | "can we test end to end now?", "what about the other configurations?" | Ran the four graded and nine extra rank/thread layouts against `bin/bpe_seq` on many generated corpora and compared outputs byte by byte |
+| Spartan runs | How to log in, whether I need a node, how to run the four configurations; I pasted the outputs | Wrote the commands, read the timing logs, found where the time went (route, select, read and send) and proposed the changes that I then tested |
+| `benchmark.slurm` | Fill the masked blocks | Wrote the SLURM header, build line, configuration tuples and the `srun` line |
+| Version control | "commit, message: ...", "push" | Ran `git add/commit/push` |
+| README and report | Draft this README and the LaTeX report | Wrote the drafts, which I reviewed and edited |
+| Report format | Check that the LaTeX source of the report is formatted correctly | Reviewed `main.tex` for LaTeX syntax and structure and suggested fixes; I compiled it on Overleaf myself |
+| References | Find literature for the report | Searched the web for the BPE and Amdahl's law papers and checked their authors, titles, venues and pages; I chose which references to keep |
+
